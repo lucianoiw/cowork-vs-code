@@ -35,7 +35,7 @@ The Code's watcher (`wait-task.sh`) runs as a background command: it costs nothi
 - The Code keeps listening while it works: new tasks can be dropped at any time and start as soon as a slot is free (at most 3 subagents at once).
 - Delivery flow for a branch:
   1. Review it (see When the doorbell rings). Problems: drop a `continue` task.
-  2. Approved: drop `Action: pr <branch>`. The Code updates the branch with `origin/main`, runs the tests, pushes the branch and opens the PR (no confirmation needed: it does not touch production). It reports the PR URL and, if the project has CI, its status. GitHub Actions is optional per project: do not ask the Code to add CI unless Luciano wants it for that project.
+  2. Approved: drop `Action: pr <branch>`. The Code updates the branch with `origin/main`, runs the tests, pushes the branch and opens the PR (the first time per repository the Code asks Luciano for a standing authorization; after that, no question). It reports the PR URL and, if the project has CI, its status. GitHub Actions is optional per project: do not ask the Code to add CI unless Luciano wants it for that project.
   3. Recommend the merge to Luciano with the PR link, then drop `Action: merge-pr <PR>`. The Code asks him with a button dialog (his notch notifier alerts him) and only then squash-merges on GitHub, updates local `main` with `git pull` and cleans up the worktree. Tell him the dialog is coming.
   4. Deploy is outside the bridge: Luciano handles it.
   Projects without a remote: `merge-pr` becomes a local merge, also confirmed by Luciano in the Code.
@@ -46,7 +46,8 @@ The Code's watcher (`wait-task.sh`) runs as a background command: it costs nothi
 
 ## After dispatching
 
-- The doorbell rings right away when something is blocked or needs a decision, otherwise when all running work is done (or every 10 minutes while long work continues).
+- The doorbell rings right away when something is blocked or needs a decision, otherwise when all running work is done. During long runs, rely on the safety check.
+- Bridge maintenance (reinstalling the skill, hooks, local settings) goes as `Action: housekeeping` with the steps listed: the Code does it itself and asks Luciano when needed.
 - Doorbell upkeep: if this conversation's doorbell fires in less than 7 days (list_triggers, next_run_at), push it 30 days ahead with update_trigger run_once_at. Change only the date, never the prompt.
 - Safety check: keep one per conversation. The first time, create it with send_later about 15 minutes ahead, name `Bridge safety check (<project>)`, message: "[bridge safety check] If any task is still in .bridge/working without a report, tell Luciano the Code is probably waiting for his approval." On later batches, re-arm the same one with update_trigger (run_once_at 15 minutes ahead, enabled true) instead of creating another. When the batch finishes first, disable it (enabled false).
 - Never delete a scheduled task bound to this conversation: deletion can delete the conversation. Disable instead.
