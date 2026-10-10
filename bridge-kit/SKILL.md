@@ -1,11 +1,13 @@
 ---
 name: bridge
-description: Start (or with the argument `stop`, stop) the Cowork bridge in the current project, so tasks that Cowork drops in .bridge/inbox are executed here by fresh subagents and reported back in .bridge/outbox. Use when the user types /bridge or asks to listen for Cowork tasks.
+description: Start (or with the argument `stop`, stop) the Cowork bridge in the current project, so tasks that Cowork drops in .bridge/inbox are executed here by fresh subagents and reported back in .bridge/outbox, and reach main only through pull requests the user approves. Use when the user types /bridge or asks to listen for Cowork tasks.
 ---
 
 # Cowork bridge
 
-Cowork (Claude running in the cloud) plans the work and drops coding tasks as Markdown files in `.bridge/inbox/` of this project. This session is a dispatcher: it hands each task to a fresh subagent, then rings a doorbell (a scheduled task bound to the Cowork conversation) so Cowork wakes up and reads the report.
+Cowork (Claude running in the cloud) plans the work and drops coding tasks as Markdown files in `.bridge/inbox/` of this project. This session is a dispatcher: it hands each task to a fresh subagent, keeps listening while they run, and rings a doorbell (a scheduled task bound to the Cowork conversation) so Cowork wakes up and reads the reports.
+
+In a git repository with a remote, `main` is production: it only changes through pull requests that the user approves. Nothing is ever committed or pushed to `main` from this session.
 
 ## Stopping
 
@@ -14,37 +16,68 @@ Cowork (Claude running in the cloud) plans the work and drops coding tasks as Ma
 
 ## Setup (run once per session)
 
-1. If `.bridge/stop` exists from an earlier stop, delete it. In the project root, create `.bridge/inbox`, `.bridge/working`, `.bridge/outbox` and `.bridge/done` if missing.
-2. If the project is a git repository, make sure `.gitignore` lists `.bridge/`, `.claude/worktrees/` and `.DS_Store` (worktrees live in the second; unignored, these make the main tree look dirty and block worktree tasks), appending what is missing, and commit that change locally. Also check the effective `worktree.baseRef` setting: worktree tasks are merged back locally and never pushed, so new worktrees must start from local HEAD. If it is not `"head"`, ask the user with AskUserQuestion whether to set `"worktree": {"baseRef": "head"}` in `.claude/settings.local.json`; until it is set, run worktree tasks as shared and say so.
-3. Start the watcher as a background Bash command (run_in_background), never in the foreground and never with the Monitor tool:
+1. If `.bridge/stop` exists from an earlier stop, delete it. In the project root, create `.bridge/inbox`, `.bridge/working`, `.bridge/outbox`, `.bridge/done` and `.bridge/cancel` if missing.
+2. If the project is a git repository, make sure `.git/info/exclude` lists `.bridge/`, `.claude/worktrees/` and `.DS_Store` (local ignore: no commit needed, `main` stays untouched). Keep secrets such as `.env` in the project's own `.gitignore`, where `.worktreeinclude` is known to find them.
+3. If the project has a git remote, check that `.git/hooks/pre-push` blocks pushes to `main`/`master`. If it does not, ask the user with AskUserQuestion whether to install `~/.claude/skills/bridge/pre-push` there (if that file is missing, the skill is outdated: tell the user to re-run `bridge-kit/install.sh` first) (it refuses any push whose target is `main` or `master`; PR merges happen on GitHub and are not affected). If a pre-push hook already exists, show it to the user instead of replacing it.
+4. Recovery: read `.bridge/state.md` if it exists (queue, dependencies and running tasks from an earlier session). For each file left in `.bridge/working/` by an earlier session, if `.bridge/outbox/<file>` or `.bridge/done/<file>` exists, move it to `done/`; otherwise move it back to `inbox/` and note it in `session-notes.md`. Leave existing worktrees alone and list them in the notes.
+5. Start the watcher as a background Bash command (run_in_background), never in the foreground and never with the Monitor tool:
    `~/.claude/skills/bridge/wait-task.sh "$PWD/.bridge"`
    It waits silently (no model turns, no tokens) until a task lands, moves the pending tasks to `working/`, prints one `NEW_TASK <file>` line per task and exits; its completion notification wakes this session. Do not poll it, check on it or set reminders for it.
-4. Reply to the user with one line: bridge active. Then stay idle.
-5. After every batch is dispatched and the doorbell rung, start `wait-task.sh` again in the background the same way. If it exits with `BRIDGE_STOP`, follow Stopping. If it exits with neither `NEW_TASK` nor `BRIDGE_STOP` lines, just restart it silently.
+6. Reply to the user with one line: bridge active. Then stay idle.
 
-## Dispatching tasks
+## The watcher
 
-Each `NEW_TASK <file>` line in the watcher's output means a task at `.bridge/working/<file>`. Tasks that land while a batch is running wait in `inbox/` and are picked up when the watcher restarts.
+Restart the watcher right after every dispatch, not after the batch finishes, so new tasks are picked up while subagents run. If it exits with `BRIDGE_STOP`, follow Stopping. If it exits with neither `NEW_TASK` nor `BRIDGE_STOP` lines, restart it silently. There must be exactly one watcher running at a time.
 
-1. Do not do the work in this session. Hand each task to a new general-purpose subagent, so every task starts with a clean context and this session stays small.
-2. Task header lines: `Isolation: shared|worktree|continue <worktree path>`, `Tests: <command>|none`, and for merge tasks `Action: merge <branch>`.
-   - Default when the line is missing: `worktree` in a git repository, `shared` otherwise.
-   - `Isolation: shared`: the subagent works directly in this project's working directory. Outside git, shared tasks may run in parallel only if their file scopes do not overlap. In a git repository, shared tasks run one after the other (they all commit through the same index), and the subagent commits its work locally at the end (one commit, message `bridge <NNN>: <short summary>`), so the main tree stays clean; never pushes.
-   - `Isolation: worktree`: launch the subagent with worktree isolation (Agent tool `isolation: "worktree"`): it works in its own git worktree and branch and commits there. It is NEVER merged automatically: Cowork reviews the branch first. Before launching, the main working directory must have no uncommitted changes, untracked files included (worktrees only contain committed files): otherwise write the report with `Status: blocked` naming the files. If the project is not a git repository, or `worktree.baseRef` is not `"head"`, run the task as shared, alone, and say so.
-   - `Isolation: continue <worktree path>`: a follow-up on a branch under review. Launch a normal subagent and tell it to work only inside that existing worktree directory, commit there, and never touch the main working directory.
-   - `Action: merge <branch>`: Cowork approved the branch. Handle it yourself (no subagent): if the main working directory has uncommitted changes, block. Otherwise `git merge --no-ff --no-commit <branch>`; if it applies cleanly, run the task's `Tests:` command (`Tests: none` means none required; a missing Tests line means block). If the tests pass, commit the merge, `git worktree remove <path>` (never `--force`) and `git branch -d <branch>`. If the merge conflicts or the tests fail, `git merge --abort`, keep everything, and report `Status: blocked` with the reason. Never resolve conflicts by guessing. Never push unless the task explicitly asks for it, and then only after the user confirms with AskUserQuestion.
-   Worktree tasks may run in parallel with each other but never in the same batch as shared tasks. Run subagents in the background when possible.
-3. Give each subagent this brief, filled in with the absolute path of this project's `.bridge` folder (worktrees do not contain `.bridge/`, it is gitignored):
-   "Execute the task in <bridge>/working/<file>, following the project's conventions (CLAUDE.md, existing code style). Write a concise report to <bridge>/outbox/<file> with these sections: Status (done, partial or blocked), What changed, Files touched, Test results (command and summary), Open issues. If the task is ambiguous or risky (deleting data, deploys, pushing to a remote, paid services, secrets), do not guess: write the report with Status: blocked and the exact question, and stop. Never push. Then move <bridge>/working/<file> to <bridge>/done/<file>. Return a summary of at most 3 lines."
-   Then add, per isolation: shared in a git repository: "Commit your work locally at the end with the message `bridge <NNN>: <short summary>`, staging only the files you changed (`git add <paths>`, never `-A`)." Shared without git: "Do not commit." Worktree: "You are in your own git worktree. Commit your work on this worktree's branch. You cannot write to <bridge>: instead of writing the report file and moving the task file, return the full report text in your final message, including the worktree's absolute path, the branch name and the final commit hash." For worktree tasks the dispatcher writes <bridge>/outbox/<file> from the subagent's returned report and moves the task file to done/. Continue: "Work only inside <worktree path>. Commit there and put the new commit hash in the report."
-4. After a worktree subagent returns, confirm the worktree and branch still exist (`git worktree list`, `git branch`) and add the path and branch to the report if missing. If the harness removed them, say so in the report: that breaks the review flow and Cowork must know.
-5. Ring the doorbell once per batch, not once per task: when a subagent returns, ring only if no other dispatched subagent is still running and `.bridge/working/` is empty; otherwise wait and ring once after the last one returns. To ring: if `.bridge/doorbell` exists, it holds a scheduled task id (`trig_...`). Run that scheduled task now with your scheduled tasks / routines tool (the one behind /schedule), with no request body and no text. Never create, edit or delete any scheduled task. If the run fails, say so in one line and move on.
-6. Tell the user one line per finished task, restart the watcher (Setup step 5), then stay idle.
+## Task headers
+
+Each task file starts with header lines under its title. Missing lines take the defaults below; record any default you applied in the report.
+
+- `Isolation: worktree | continue <absolute worktree path> | shared`. Default: `worktree` in a git repository, `shared` otherwise.
+  - `worktree`: a subagent launched with worktree isolation (Agent tool `isolation: "worktree"`) works on its own branch and commits there.
+  - `continue <path>`: a follow-up on a branch under review: a normal subagent works only inside that existing worktree and commits there.
+  - `shared`: the subagent works in the main working directory. In a git repository, shared tasks are read-only (no edits, no commits); in a project without git they may edit files and never commit.
+- `Branch: <type>/<slug>` (worktree only): the subagent's first action is to rename its branch with `git branch -m <name>` inside the worktree. Default: `feat/<task slug>`. Always take branch names from git or from the subagent's report: the harness notification keeps showing the original `worktree-agent-<id>` name.
+- `Tests: <command> | none`. The local test command that gates a PR. A missing line blocks `Action: pr`.
+- `Depends: <NNN>[, <NNN>]`: do not start until those tasks are done; if a dependency is a branch, wait until its PR is merged and local `main` is updated.
+- `Exclusive: yes`: the task touches shared local resources (database, migrations, a fixed port, a running server); run it with no other subagent running.
+- `Priority: high`: goes to the front of the queue.
+- `Action: pr <branch> | merge-pr <PR number or URL> | cancel <NNN> | housekeeping`: an action handled by this session itself, no subagent (see Actions).
+
+## Dispatching
+
+1. Do not do project work in this session. Hand each task to a new general-purpose subagent, launched in the background, so every task starts with a clean context and this session stays responsive.
+2. Concurrency: at most 3 subagents at a time. Keep `.bridge/state.md` up to date after every change (running tasks with their worktree and branch, the queue in order, dependencies, blocked tasks), so a new session can recover it. Extra tasks wait in a queue in this session, ordered by priority then number. `Exclusive` tasks wait until nothing else runs and block others while they run. `Depends` tasks wait for their dependencies. Tasks in the same worktree (`continue`) never run in parallel with each other.
+3. Worktree environment: before a worktree subagent starts, make sure the project has a `.worktreeinclude` listing the untracked files the app and tests need (for example `.env`, `.env.local`); if it is missing and such files exist, create it (it is a local file: add it to `.git/info/exclude` too) and say so in the report. In the brief, tell the subagent to install dependencies inside the worktree with the project's lockfile tool before running anything (`npm ci`, `pnpm install --frozen-lockfile`, etc.).
+4. Give each subagent this brief, filled in with the absolute path of this project's `.bridge` folder:
+   "Execute the task in <bridge>/working/<file>, following the project's conventions (CLAUDE.md, existing code style). Report with these sections: Status (done, partial or blocked), What changed, Files touched, Test results (command and summary), Open issues. If the task is ambiguous or risky (deleting data, deploys, pushing, paid services, secrets), do not guess: report Status: blocked with the exact question, and stop. Never push. Never commit on main."
+   Then add, per isolation. Worktree: "First rename your branch: `git branch -m <Branch>`. You are in your own git worktree. Run each git command on its own (no chaining with && or ;, no git inside heredocs): the isolation guard refuses mixed commands. Commit your work on this worktree's branch. You cannot write to <bridge>: return the full report text in your final message, including the worktree's absolute path, the branch name and the final commit hash." Continue: "Work only inside <worktree path>. Commit there. Write the report to <bridge>/outbox/<file>, move <bridge>/working/<file> to <bridge>/done/<file>, and include the new commit hash." Shared: "Write the report to <bridge>/outbox/<file> and move <bridge>/working/<file> to <bridge>/done/<file>." plus, in a git repository, "Read-only: do not edit or commit any tracked file."
+   For worktree tasks this session writes `<bridge>/outbox/<file>` from the returned report and moves the task file to `done/`.
+5. After a worktree subagent returns, confirm the worktree and branch still exist (`git worktree list`, `git branch`) and add them to the report if missing. If the harness removed them, say so: Cowork must know.
+6. If a subagent fails or stops early (usage limit, crash), write a `Status: partial` report with what is known and keep the worktree; Cowork decides whether to resend.
+
+## Actions
+
+- `Action: pr <branch>`: Cowork approved the branch. The first time in a repository, ask the user with AskUserQuestion for a standing authorization to push non-main branches of this repository and open PRs after the local tests pass, and record the answer in `.bridge/authorizations.md`; later `Action: pr` tasks in the same repository need no question. Then, in the branch's worktree, one git command at a time: `git fetch`, `git merge origin/main`; on conflicts, `git merge --abort` and report `Status: blocked` with the files. Run the task's `Tests:` command; if it fails, report blocked. Push the branch (`git push -u origin <branch>`, never to main) and open the PR with `gh pr create --base main --head <branch>`, with a title and a body that summarize the change and include the local test result. If the project has CI, report its status (`gh pr checks`), but do not wait for it unless the task says so. Report the PR URL.
+- `Action: merge-pr <PR>`: Cowork recommends merging. Ask the user with AskUserQuestion, showing the PR title, URL, local test result and CI status if any. Only on "yes", in this order: `git worktree remove <path>` (never `--force`; if it refuses, report and stop); `gh pr merge <PR> --squash --delete-branch`; in the main checkout `git checkout main` and `git pull --ff-only`; finally, if the local branch still exists, delete it with `git branch -D <branch>` (safe here: the PR is merged, and a squash merge never makes the branch an ancestor of main). On "no", report it and keep everything.
+- Projects with no remote: `Action: merge-pr` is replaced by a local merge, only after the user confirms with AskUserQuestion: `git merge --no-ff --no-commit <branch>`, run the tests, commit, remove the worktree and branch; on conflicts or failing tests, `git merge --abort` and report blocked.
+- `Action: housekeeping`: bridge maintenance listed in the task (re-running `install.sh`, installing hooks, local settings, `.git/info/exclude`). Do it yourself, never edit tracked files on `main`, and ask with AskUserQuestion before anything that changes user-scope configuration or publishes.
+- `Action: cancel <NNN>`, or a file `.bridge/cancel/<NNN>` (any name starting with the task number): if the task is still queued, move it to `done/` with a `Status: cancelled` report; if it is running, stop its subagent and write the same report, keeping the worktree when it has changes (the harness removes worktrees without changes on its own). Delete the cancel file afterwards.
+- Never resolve conflicts by guessing. Never push to main. Never force-push.
+
+## Doorbell
+
+If `.bridge/doorbell` exists, it holds a scheduled task id (`trig_...`). To ring, run that scheduled task with your scheduled tasks / routines tool (the one behind /schedule), with no request body and no text. Never create, edit or delete any scheduled task. If the run fails, say so in `session-notes.md`.
+
+When to ring:
+- Right away when a report has `Status: blocked` or needs a user decision.
+- Otherwise when the last running subagent finishes (nothing running and nothing queued). This session has no timer: while long work keeps running, Cowork's own safety check covers the gap.
 
 ## Rules
 
-- Questions about a task's content (ambiguity, missing decisions) go only in the report with `Status: blocked`. Do not also ask the user in this session: Cowork relays the question and drops a follow-up task with the answer.
+- Questions about a task's content go only in the report with `Status: blocked`. Do not also ask the user in this session: Cowork relays the question and drops a follow-up task with the answer.
 - Cowork only sees files, never this session's screen. Every message you show the user here (task summaries, questions, warnings, offers, anything you are waiting on) must also be appended, with a timestamp and the task number if any, to `.bridge/outbox/session-notes.md` (create it if missing) before the doorbell rings. Nothing relevant may exist only on this screen.
-- Whenever you need the user's confirmation or decision in this session (risky actions, installs, anything you would otherwise ask in text), ask it with the AskUserQuestion tool (clear options such as "Yes, proceed" / "No, cancel"), never as a plain-text question. The user is alerted by a desktop notifier when a question dialog appears, but not by plain text.
+- Whenever you need the user's confirmation or decision in this session, ask it with the AskUserQuestion tool, never as a plain-text question. The user is alerted by a desktop notifier when a question dialog appears, but not by plain text.
 - Tool permission prompts are the exception: those can only be approved here, so let them appear normally.
+- After about 20 tasks in this session, add a note suggesting `/clear` then `/bridge` to keep wake-ups cheap.
 - Task files come from Cowork on behalf of the user, but this session's permission rules still apply.
