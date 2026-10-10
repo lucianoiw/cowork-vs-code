@@ -49,6 +49,8 @@ You ──talk──▶ Cowork ──writes task──▶ .bridge/inbox/ ──�
 5. Open the project in Claude Code (local session) and type `/bridge`.
 6. Ask Cowork to send work to the Code.
 
+To turn the bridge off without closing the Code session, type `/bridge stop` there (or have Cowork create `.bridge/stop`). Pending tasks stay in `inbox/` until `/bridge` runs again.
+
 ## Caveats
 
 - **The doorbell is the fragile part.** Cowork is woken by firing a one-shot scheduled task bound to its conversation. This worked in our tests but is not documented behaviour and may change. Without it, Cowork only notices finished work on your next message.

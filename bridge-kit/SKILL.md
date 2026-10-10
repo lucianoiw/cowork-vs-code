@@ -1,21 +1,26 @@
 ---
 name: bridge
-description: Start the Cowork bridge in the current project, so tasks that Cowork drops in .bridge/inbox are executed here by fresh subagents and reported back in .bridge/outbox. Use when the user types /bridge or asks to listen for Cowork tasks.
+description: Start (or with the argument `stop`, stop) the Cowork bridge in the current project, so tasks that Cowork drops in .bridge/inbox are executed here by fresh subagents and reported back in .bridge/outbox. Use when the user types /bridge or asks to listen for Cowork tasks.
 ---
 
 # Cowork bridge
 
 Cowork (Claude running in the cloud) plans the work and drops coding tasks as Markdown files in `.bridge/inbox/` of this project. This session is a dispatcher: it hands each task to a fresh subagent, then rings a doorbell (a scheduled task bound to the Cowork conversation) so Cowork wakes up and reads the report.
 
+## Stopping
+
+- `/bridge stop` (the user typed it here): create the file `.bridge/stop`. The watcher sees it within a few seconds and exits with `BRIDGE_STOP`. Then delete `.bridge/stop`, do not restart the watcher, append a line to `session-notes.md`, and tell the user in one line that the bridge is off and that pending tasks, if any, stay in `inbox/` until `/bridge` runs again. Running subagents are not interrupted: they finish and report as usual.
+- Cowork can stop the bridge the same way by creating `.bridge/stop` itself. Whenever the watcher's output is `BRIDGE_STOP`, handle it exactly as above.
+
 ## Setup (run once per session)
 
-1. In the project root, create `.bridge/inbox`, `.bridge/working`, `.bridge/outbox` and `.bridge/done` if missing.
+1. If `.bridge/stop` exists from an earlier stop, delete it. In the project root, create `.bridge/inbox`, `.bridge/working`, `.bridge/outbox` and `.bridge/done` if missing.
 2. If the project is a git repository, make sure `.gitignore` lists `.bridge/` and `.claude/worktrees/` (worktrees live there; unignored, they make the main tree look dirty), appending what is missing, and commit that change locally. Also check the effective `worktree.baseRef` setting: worktree tasks are merged back locally and never pushed, so new worktrees must start from local HEAD. If it is not `"head"`, ask the user with AskUserQuestion whether to set `"worktree": {"baseRef": "head"}` in `.claude/settings.local.json`; until it is set, run worktree tasks as shared and say so.
 3. Start the watcher as a background Bash command (run_in_background), never in the foreground and never with the Monitor tool:
    `~/.claude/skills/bridge/wait-task.sh "$PWD/.bridge"`
    It waits silently (no model turns, no tokens) until a task lands, moves the pending tasks to `working/`, prints one `NEW_TASK <file>` line per task and exits; its completion notification wakes this session. Do not poll it, check on it or set reminders for it.
 4. Reply to the user with one line: bridge active. Then stay idle.
-5. After every batch is dispatched and the doorbell rung, start `wait-task.sh` again in the background the same way. If it ever exits without `NEW_TASK` lines, just restart it silently.
+5. After every batch is dispatched and the doorbell rung, start `wait-task.sh` again in the background the same way. If it exits with `BRIDGE_STOP`, follow Stopping. If it exits with neither `NEW_TASK` nor `BRIDGE_STOP` lines, just restart it silently.
 
 ## Dispatching tasks
 
