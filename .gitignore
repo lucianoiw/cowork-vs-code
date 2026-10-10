@@ -1,3 +1,5 @@
 .bridge/
 _to_delete/
 node_modules/
+.claude/worktrees/
+*.zip
