@@ -1,0 +1,12 @@
+#!/bin/bash
+# Cowork bridge: refuse any push that targets main or master.
+# Changes reach main only through pull requests merged on GitHub.
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main|refs/heads/master)
+      echo "pre-push: pushing to ${remote_ref#refs/heads/} is blocked. Open a pull request instead." >&2
+      exit 1
+      ;;
+  esac
+done
+exit 0
