@@ -3,3 +3,4 @@ _to_delete/
 node_modules/
 .claude/worktrees/
 *.zip
+.DS_Store
