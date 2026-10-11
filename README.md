@@ -58,7 +58,7 @@ You ──talk──▶ Cowork ──writes task──▶ .bridge/inbox/ ──�
 2. Add `bridge-kit/cowork-skill/code-bridge/` as a skill in Claude (Cowork side). It is written for its author: adapt the names and paths.
 3. Link the Cowork conversation to your computer (desktop app) and connect the project folder.
 4. Create the doorbell: a one-shot scheduled task bound to the Cowork conversation. Put its id (`trig_...`) in `.bridge/doorbell`. Without that file the Code never rings.
-5. Open the project in Claude Code (local session) and type `/bridge`. In a project with a remote, it asks whether to install the pre-push hook into `.git/hooks/` when none blocks pushes to `main`; an existing pre-push hook is shown to you, not replaced.
+5. Open the project in Claude Code (local session) and type `/bridge`. The `/bridge` session must run on the project folder itself, not in a worktree session: opened in a worktree, it refuses to start. In a project with a remote, it asks whether to install the pre-push hook into `.git/hooks/` when none blocks pushes to `main`; an existing pre-push hook is shown to you, not replaced.
 6. Ask Cowork to send work to the Code.
 
 To turn the bridge off without closing the Code session, type `/bridge stop` there (or have Cowork create `.bridge/stop`). Running subagents finish and report as usual; pending tasks stay in `inbox/` until `/bridge` runs again.

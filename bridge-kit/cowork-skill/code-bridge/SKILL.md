@@ -16,7 +16,7 @@ The Code's watcher (`wait-task.sh`) runs as a background command: it costs nothi
 1. Make sure the project folder is connected to this conversation (device_request_folder_access if not). All file work goes through device_bash under `$HOME/mnt/<folder>`.
 2. Create `.bridge/inbox`, `.bridge/working`, `.bridge/outbox`, `.bridge/done` and `.bridge/read` if missing.
 3. Doorbell: if `.bridge/doorbell` holds an id, check it with list_triggers. If that doorbell belongs to another conversation, disable it (update_trigger enabled false) before creating this one. Then create one with send_later (initiation own_followup), `at` 30 days ahead, name `Bridge doorbell (<project>)`, message: `[bridge doorbell] The Code finished task(s). Check .bridge/outbox in the connected project folder(s), verify the results and report to Luciano.` Write the returned `trig_...` id to `.bridge/doorbell`. Firing it by hand does not consume it.
-4. Ask Luciano to open the project in the Code tab (local, same folder) and type `/bridge`, unless he says it is already running.
+4. Ask Luciano to open the project in the Code tab (local, same folder) and type `/bridge`, unless he says it is already running. The Code session must be opened on the project folder with worktree off (Local): in a worktree session `/bridge` refuses to start.
 5. Check the watcher: drop the first task and confirm it moves from `inbox/` to `working/` within about 10 seconds. If it does not, the Code session is not listening: tell him.
 
 ## Writing tasks
