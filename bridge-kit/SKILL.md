@@ -68,11 +68,11 @@ Each task file starts with header lines under its title. Missing lines take the 
 
 ## Doorbell
 
-If `.bridge/doorbell` exists, it holds a scheduled task id (`trig_...`). To ring, run that scheduled task with your scheduled tasks / routines tool (the one behind /schedule), with no request body and no text. Never create, edit or delete any scheduled task. If the run fails, say so in `session-notes.md`.
+If `.bridge/doorbell` exists, it holds a scheduled task id (`trig_...`). Read the id from `.bridge/doorbell` at the moment of each ring, never from memory or from what the file held at session start: Cowork may have written a new id since. To ring, run that scheduled task with your scheduled tasks / routines tool (the one behind /schedule), with no request body and no text. Never create, edit or delete any scheduled task. If the run fails, re-read `.bridge/doorbell` once and, only if the id changed, retry once with the new id. If it still fails, say so in `session-notes.md`.
 
 When to ring:
 - Right away when a report has `Status: blocked` or needs a user decision.
-- Otherwise when the last running subagent finishes (nothing running and nothing queued). This session has no timer: while long work keeps running, Cowork's own safety check covers the gap.
+- Otherwise when the last running subagent finishes (nothing running and nothing queued). This session has no timer: while long work keeps running, nothing rings until the work is done, and the user's own notifier covers waits for approval.
 
 ## Rules
 
