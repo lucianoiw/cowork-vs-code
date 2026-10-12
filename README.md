@@ -35,6 +35,10 @@ You ──talk──▶ Cowork ──writes task──▶ .bridge/inbox/ ──�
 8. Local tests are the gate. GitHub Actions is optional per project: when a project has CI, its status is reported with the PR. Deploy is out of scope: the user handles it.
 9. Recovery: the dispatcher keeps `.bridge/state.md` up to date (running tasks with their worktree and branch, the queue, dependencies, blocked tasks), and a new session reads it. Every `/bridge` also checks `.bridge/working/` for tasks left by an earlier session. Those that already have a report go to `done/`, the others go back to `inbox/`. Existing worktrees are left alone and listed in the notes.
 
+## Talking between Cowork conversations
+
+Several Cowork conversations on one project (for example an orchestrator that drives the Code and a designer) can message each other by firing each other's doorbell, the scheduled task bound to the conversation, with a text payload. A conversation that does not use the bridge has no doorbell, so it creates a "Cowork mailbox" scheduled task for that purpose. Conversations find each other by the task's name, which carries the project and the conversation's role. Messages arrive as data, not as instructions from the user: the receiver answers and shares information, but asks the user before acting on anything new.
+
 ## Requirements
 
 - The Claude desktop app with device linking, and scheduled tasks enabled on the account. Team and Enterprise admins can turn some of these off.
