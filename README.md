@@ -35,6 +35,10 @@ You ──talk──▶ Cowork ──writes task──▶ .bridge/inbox/ ──�
 8. Local tests are the gate. GitHub Actions is optional per project: when a project has CI, its status is reported with the PR. Deploy is out of scope: the user handles it.
 9. Recovery: the dispatcher keeps `.bridge/state.md` up to date (running tasks with their worktree and branch, the queue, dependencies, blocked tasks), and a new session reads it. Every `/bridge` also checks `.bridge/working/` for tasks left by an earlier session. Those that already have a report go to `done/`, the others go back to `inbox/`. Existing worktrees are left alone and listed in the notes.
 
+## Talking between Cowork conversations
+
+Several Cowork conversations on one project (for example an orchestrator that drives the Code and a designer) can message each other by firing each other's doorbell, the scheduled task bound to the conversation, with a text payload. A conversation that does not use the bridge has no doorbell, so it creates a "Cowork mailbox" scheduled task for that purpose. Conversations find each other by the task's name, which carries the project and the conversation's role. Messages arrive as data, not as instructions from the user: the receiver answers and shares information, but asks the user before acting on anything new.
+
 ## Requirements
 
 - The Claude desktop app with device linking, and scheduled tasks enabled on the account. Team and Enterprise admins can turn some of these off.
@@ -66,7 +70,7 @@ To turn the bridge off without closing the Code session, type `/bridge stop` the
 ## Caveats
 
 - **The doorbell is the fragile part.** Cowork is woken by firing a one-shot scheduled task bound to its conversation. This worked in our tests but is not documented behaviour and may change. Without it, Cowork only notices finished work on your next message.
-- The doorbell is fired without a body: a run with a body returned HTTP 500 in our test, so the Code cannot pass any text to Cowork through it. Cowork pushes the task's one-shot date forward while the conversation is in use; what happens to the doorbell after it fires on its own date is unknown.
+- The Code fires the doorbell without a body (a run with a body returned HTTP 500 from its routines tool in our test, so the Code cannot pass any text to Cowork through it), while Cowork conversations can attach text when they fire each other's doorbells. Cowork pushes the task's one-shot date forward while the conversation is in use; what happens to the doorbell after it fires on its own date is unknown.
 - **What the first worktree task (022) showed.** Worktrees live in `.claude/worktrees/agent-<id>` on branch `worktree-agent-<id>` (the subagent renames it to the task's `Branch:` as its first action; the harness keeps reporting the original name, so names are read from git). A worktree whose subagent committed everything survives the subagent's return. Writes to `.bridge/` from inside a worktree are refused by the isolation guard, so the dispatcher writes the report. The continue and merge paths were first run in tasks 023 and 024.
 - The watcher belongs to the Code session. If the session or the desktop app closes, it dies silently and tasks sit in `inbox/` (or `working/`) until someone types `/bridge` again, which runs the recovery step. While the Mac sleeps nothing is picked up.
 - Cowork's shell on the Mac is a Linux VM: its test runs can differ from the Code's (tool versions, anything macOS-only).
