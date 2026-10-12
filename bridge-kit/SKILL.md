@@ -16,14 +16,15 @@ In a git repository with a remote, `main` is production: it only changes through
 
 ## Setup (run once per session)
 
-1. If `.bridge/stop` exists from an earlier stop, delete it. In the project root, create `.bridge/inbox`, `.bridge/working`, `.bridge/outbox`, `.bridge/done` and `.bridge/cancel` if missing.
-2. If the project is a git repository, make sure `.git/info/exclude` lists `.bridge/`, `.claude/worktrees/` and `.DS_Store` (local ignore: no commit needed, `main` stays untouched). Keep secrets such as `.env` in the project's own `.gitignore`, where `.worktreeinclude` is known to find them.
-3. If the project has a git remote, check that `.git/hooks/pre-push` blocks pushes to `main`/`master`. If it does not, ask the user with AskUserQuestion whether to install `~/.claude/skills/bridge/pre-push` there (if that file is missing, the skill is outdated: tell the user to re-run `bridge-kit/install.sh` first) (it refuses any push whose target is `main` or `master`; PR merges happen on GitHub and are not affected). If a pre-push hook already exists, show it to the user instead of replacing it.
-4. Recovery: read `.bridge/state.md` if it exists (queue, dependencies and running tasks from an earlier session). For each file left in `.bridge/working/` by an earlier session, if `.bridge/outbox/<file>` or `.bridge/done/<file>` exists, move it to `done/`; otherwise move it back to `inbox/` and note it in `session-notes.md`. Leave existing worktrees alone and list them in the notes.
-5. Start the watcher as a background Bash command (run_in_background), never in the foreground and never with the Monitor tool:
+1. Worktree guard, before anything else (only in a git repository): run `git rev-parse --git-dir` and `git rev-parse --git-common-dir`, each on its own. If they point to different directories (compare them as resolved paths), this session is inside a git worktree, not on the base checkout: `.bridge/` lives in the base checkout, outside this working directory, so every report write would need the user's confirmation. Do NOT run the steps below and do NOT start the watcher. Tell the user, in PT-BR: "Esta sessão foi aberta em modo worktree, e a bridge precisa rodar no checkout base do projeto. Abra uma nova sessão na pasta do projeto com worktree desligado (Local) e rode `/bridge` lá." Append the same message, with a timestamp, to `.bridge/outbox/session-notes.md` of the base checkout (the parent folder of the common git dir) only if that write needs no confirmation; otherwise skip it. Then stop.
+2. If `.bridge/stop` exists from an earlier stop, delete it. In the project root, create `.bridge/inbox`, `.bridge/working`, `.bridge/outbox`, `.bridge/done` and `.bridge/cancel` if missing.
+3. If the project is a git repository, make sure `.git/info/exclude` lists `.bridge/`, `.claude/worktrees/` and `.DS_Store` (local ignore: no commit needed, `main` stays untouched). Keep secrets such as `.env` in the project's own `.gitignore`, where `.worktreeinclude` is known to find them.
+4. If the project has a git remote, check that `.git/hooks/pre-push` blocks pushes to `main`/`master`. If it does not, ask the user with AskUserQuestion whether to install `~/.claude/skills/bridge/pre-push` there (if that file is missing, the skill is outdated: tell the user to re-run `bridge-kit/install.sh` first) (it refuses any push whose target is `main` or `master`; PR merges happen on GitHub and are not affected). If a pre-push hook already exists, show it to the user instead of replacing it.
+5. Recovery: read `.bridge/state.md` if it exists (queue, dependencies and running tasks from an earlier session). For each file left in `.bridge/working/` by an earlier session, if `.bridge/outbox/<file>` or `.bridge/done/<file>` exists, move it to `done/`; otherwise move it back to `inbox/` and note it in `session-notes.md`. Leave existing worktrees alone and list them in the notes.
+6. Start the watcher as a background Bash command (run_in_background), never in the foreground and never with the Monitor tool:
    `~/.claude/skills/bridge/wait-task.sh "$PWD/.bridge"`
    It waits silently (no model turns, no tokens) until a task lands, moves the pending tasks to `working/`, prints one `NEW_TASK <file>` line per task and exits; its completion notification wakes this session. Do not poll it, check on it or set reminders for it.
-6. Reply to the user with one line: bridge active. Then stay idle.
+7. Reply to the user with one line: bridge active. Then stay idle.
 
 ## The watcher
 
@@ -67,11 +68,11 @@ Each task file starts with header lines under its title. Missing lines take the 
 
 ## Doorbell
 
-If `.bridge/doorbell` exists, it holds a scheduled task id (`trig_...`). To ring, run that scheduled task with your scheduled tasks / routines tool (the one behind /schedule), with no request body and no text. Never create, edit or delete any scheduled task. If the run fails, say so in `session-notes.md`.
+If `.bridge/doorbell` exists, it holds a scheduled task id (`trig_...`). Read the id from `.bridge/doorbell` at the moment of each ring, never from memory or from what the file held at session start: Cowork may have written a new id since. To ring, run that scheduled task with your scheduled tasks / routines tool (the one behind /schedule), with no request body and no text. Never create, edit or delete any scheduled task. If the run fails, re-read `.bridge/doorbell` once and, only if the id changed, retry once with the new id. If it still fails, say so in `session-notes.md`.
 
 When to ring:
 - Right away when a report has `Status: blocked` or needs a user decision.
-- Otherwise when the last running subagent finishes (nothing running and nothing queued). This session has no timer: while long work keeps running, Cowork's own safety check covers the gap.
+- Otherwise when the last running subagent finishes (nothing running and nothing queued). This session has no timer: while long work keeps running, nothing rings until the work is done, and the user's own notifier covers waits for approval.
 
 ## Rules
 

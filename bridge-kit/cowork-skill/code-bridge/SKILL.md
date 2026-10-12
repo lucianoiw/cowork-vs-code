@@ -16,7 +16,7 @@ The Code's watcher (`wait-task.sh`) runs as a background command: it costs nothi
 1. Make sure the project folder is connected to this conversation (device_request_folder_access if not). All file work goes through device_bash under `$HOME/mnt/<folder>`.
 2. Create `.bridge/inbox`, `.bridge/working`, `.bridge/outbox`, `.bridge/done` and `.bridge/read` if missing.
 3. Doorbell: if `.bridge/doorbell` holds an id, check it with list_triggers. If that doorbell belongs to another conversation, disable it (update_trigger enabled false) before creating this one. Then create one with send_later (initiation own_followup), `at` 30 days ahead, name `Bridge doorbell (<project>)`, message: `[bridge doorbell] The Code finished task(s). Check .bridge/outbox in the connected project folder(s), verify the results and report to Luciano.` Write the returned `trig_...` id to `.bridge/doorbell`. Firing it by hand does not consume it.
-4. Ask Luciano to open the project in the Code tab (local, same folder) and type `/bridge`, unless he says it is already running.
+4. Ask Luciano to open the project in the Code tab (local, same folder) and type `/bridge`, unless he says it is already running. The Code session must be opened on the project folder with worktree off (Local): in a worktree session `/bridge` refuses to start.
 5. Check the watcher: drop the first task and confirm it moves from `inbox/` to `working/` within about 10 seconds. If it does not, the Code session is not listening: tell him.
 
 ## Writing tasks
@@ -46,10 +46,9 @@ The Code's watcher (`wait-task.sh`) runs as a background command: it costs nothi
 
 ## After dispatching
 
-- The doorbell rings right away when something is blocked or needs a decision, otherwise when all running work is done. During long runs, rely on the safety check.
+- The doorbell rings right away when something is blocked or needs a decision, otherwise when all running work is done. During long runs nothing rings until the work is done; if Luciano asks, look at `.bridge/state.md` and `working/`.
 - Bridge maintenance (reinstalling the skill, hooks, local settings) goes as `Action: housekeeping` with the steps listed: the Code does it itself and asks Luciano when needed.
 - Doorbell upkeep: if this conversation's doorbell fires in less than 7 days (list_triggers, next_run_at), push it 30 days ahead with update_trigger run_once_at. Change only the date, never the prompt.
-- Safety check: keep one per conversation. The first time, create it with send_later about 15 minutes ahead, name `Bridge safety check (<project>)`, message: "[bridge safety check] If any task is still in .bridge/working without a report, tell Luciano the Code is probably waiting for his approval." On later batches, re-arm the same one with update_trigger (run_once_at 15 minutes ahead, enabled true) instead of creating another. When the batch finishes first, disable it (enabled false).
 - Never delete a scheduled task bound to this conversation: deletion can delete the conversation. Disable instead.
 - Keep talking with Luciano about anything else meanwhile.
 
@@ -66,12 +65,12 @@ The Code's watcher (`wait-task.sh`) runs as a background command: it costs nothi
 
 ## Finishing
 
-When Luciano says he is done with the project for now: disable this conversation's doorbell and safety check (enabled false). The Code session costs nothing while idle, but closing it when the project is over keeps things tidy. If the Code session's context has grown large, suggest `/clear` plus `/bridge` there to make later wake-ups cheaper.
+When Luciano says he is done with the project for now: disable this conversation's doorbell (enabled false). The Code session costs nothing while idle, but closing it when the project is over keeps things tidy. If the Code session's context has grown large, suggest `/clear` plus `/bridge` there to make later wake-ups cheaper.
 
 ## Limits to remember
 
 - Cowork sees only files. Anything the Code shows on screen reaches Cowork only through `session-notes.md`.
 - The Code cannot reach this conversation except through the doorbell; Cowork cannot type into the Code.
-- Tool permission prompts and risky-action confirmations in the Code can only be answered there by Luciano; the safety check covers stalls.
+- Tool permission prompts and risky-action confirmations in the Code can only be answered there by Luciano. His notch notifier (ClaudeFuel) alerts him when the Code is waiting, so Cowork does not schedule safety checks.
 - If the Code session is closed, the app quits or the Mac sleeps, tasks wait in `inbox/` (or in `working/` if the watcher already moved them) until it is back.
 - Each doorbell ring costs one Cowork turn.
