@@ -156,11 +156,12 @@ export const register: Register = on => {
     )
   })
 
-  // Denies a `git push` that lands on main or master. It only ever denies.
+  // Denies a `git push` that lands on main or master, in every project, with
+  // or without a `.bridge` folder. It only ever denies.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const checks = pushChecks(e.command)
 
-    if (checks.length === 0 || !(await $.fs.exists(BRIDGE))) {
+    if (checks.length === 0) {
       return next(e)
     }
 

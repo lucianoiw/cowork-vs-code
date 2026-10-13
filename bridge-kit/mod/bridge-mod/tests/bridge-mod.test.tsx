@@ -192,23 +192,28 @@ test('other commands and other tools are left alone', async ($, on) => {
   expect(seen.gitCwds).toEqual([])
 })
 
-test('without a .bridge folder the guard does nothing', async ($, on) => {
-  const seen = world(on)
-  const ran = await $.tool.call({ tool: 'Bash', command: 'git push origin main' })
+test('without a .bridge folder the guard still denies', async ($, on) => {
+  const seen = world(on, { branch: 'main' })
+  const explicit = await $.tool.call({ tool: 'Bash', command: 'git push origin main' })
+  const bare = await $.tool.call({ tool: 'Bash', command: 'git push' })
+  await $.tool.call({ tool: 'Bash', command: 'git push origin feat/x' })
 
-  expect(ran.deny).toBe(undefined)
-  expect(seen.ran).toEqual(['git push origin main'])
+  expect(explicit.deny).toBe(DENY)
+  expect(bare.deny).toBe(DENY)
+  expect(seen.ran).toEqual(['git push origin feat/x'])
 })
 
 // ---- the status line and the panel
 
-test('without a .bridge folder the mod shows and registers nothing', async ($, on) => {
+test('without a .bridge folder the mod shows and registers nothing, and still guards', async ($, on) => {
   const clock = mock.clock(on)
   const seen = world(on)
 
   await $.session.start(START)
   await clock.advance(30_000)
+  const ran = await $.tool.call({ tool: 'Bash', command: 'git push origin main' })
 
+  expect(ran.deny).toBe(DENY)
   expect(seen.statuses).toEqual([])
   expect(seen.commands).toEqual([])
 })
