@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { BridgeSnapshot, BridgeTask } from '../types'
 import { drawBand, drawBandText, isBandVisible } from './band'
-import { lastNotes } from './format'
+import { lastNotes, splitTasks } from './format'
 import { drawDashboard, drawText } from './pane'
 import { pushChecks } from './push-guard'
 
@@ -38,8 +38,14 @@ const taskFiles = async ($: EngineInterface, folder: string) => {
   return { tasks, writtenAt: Math.max(0, ...entries.map(entry => entry.mtimeMs)) }
 }
 
+const counts = (now: BridgeSnapshot): [number, number, number] => [
+  now.queued.length,
+  now.running.length,
+  now.outbox.length,
+]
+
 const names = (now: BridgeSnapshot) =>
-  [now.working, now.inbox, now.outbox]
+  [now.running, now.queued, now.outbox]
     .map(tasks => tasks.map(task => task.file).join(','))
     .join('|')
 
@@ -66,16 +72,17 @@ const refresh = async ($: EngineInterface, memo: Memo) => {
   ])
   const doorbell = (await $.fs.read(`${BRIDGE}/doorbell`).catch(() => '')).trim()
   const notes = lastNotes(await $.fs.read(`${BRIDGE}/outbox/${NOTES}`).catch(() => ''), 5)
+  const state = await $.fs.read(`${BRIDGE}/state.md`).catch(() => null)
   const time = await $.clock.now()
   const now: BridgeSnapshot = {
     project: memo.project,
-    working: working.tasks,
-    inbox: inbox.tasks,
+    ...splitTasks(working.tasks, inbox.tasks, state),
     outbox: outbox.tasks,
     doorbell: doorbell === '' ? null : doorbell,
     notes,
     refreshedAt: time,
     changedAt: Math.max(working.writtenAt, inbox.writtenAt, outbox.writtenAt),
+    shift: null,
   }
   // Written at every tick, so the pane's ages are drawn again. A task that
   // came or went since the last reading is a change now, whatever the mtimes.
@@ -88,6 +95,7 @@ const refresh = async ($: EngineInterface, memo: Memo) => {
             now.changedAt,
             names(before) === names(now) ? before.changedAt : time,
           ),
+          shift: counts(before).join() === counts(now).join() ? null : counts(before),
         },
   )
 }
@@ -129,15 +137,16 @@ export const register: Register = on => {
   // The band above the prompt: there while the bridge is or was lately busy.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const now = await read($, snapshot)
+    const time = await $.clock.now()
 
-    if (e.props.hasSurvey || !isBandVisible(now, await $.clock.now())) {
+    if (e.props.hasSurvey || !isBandVisible(now, time)) {
       return next(e)
     }
     const open = () => openPane($, memo)
 
     return e.surface === 'terminal'
       ? drawBandText($.ui.resolve(e), now, open)
-      : drawBand($.ui.resolve(e), now, open)
+      : drawBand($.ui.resolve(e), now, time, e.props.bodyColumns, open)
   })
 
   // Denies a `git push` that lands on main or master, in every project, with
