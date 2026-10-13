@@ -1,13 +1,20 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
+import type { TestBody } from 'claude-code/testing'
+
+import { ago, clamp, lastNotes, parseNote, taskLabel } from '../hooks/format'
 
 const DENY =
   'bridge-mod: pushing to main/master is blocked; changes reach main only through a PR.'
+
+const NO_BAND = '(no band of the mod)'
 
 type World = {
   // path (relative to the project) -> file text; a folder exists when a file
   // is under it. No `.bridge/...` path at all: a project without the bridge.
   files?: Record<string, string>
+  // path -> when the file was last modified, in milliseconds; 1 when not given
+  mtimes?: Record<string, number>
   // what `git rev-parse --abbrev-ref HEAD` prints
   branch?: string
   // the branch cannot be read: the command itself fails to run
@@ -18,7 +25,7 @@ type World = {
 // a record of what the mod showed, ran and (never) wrote.
 const world = (
   on: On,
-  { files = {}, branch = 'main', isBroken = false }: World = {},
+  { files = {}, mtimes = {}, branch = 'main', isBroken = false }: World = {},
 ) => {
   const seen = {
     statuses: [] as (string | undefined)[],
@@ -39,7 +46,13 @@ const world = (
       .filter(file => file.startsWith(`${under(e.path)}/`))
       .map(file => file.slice(under(e.path).length + 1))
       .filter(name => !name.includes('/'))
-      .map(name => ({ name, kind: 'file' as const, size: 1, mtimeMs: 1, isLink: false })),
+      .map(name => ({
+        name,
+        kind: 'file' as const,
+        size: 1,
+        mtimeMs: mtimes[`${under(e.path)}/${name}`] ?? 1,
+        isLink: false,
+      })),
   }))
   on('fs.read', (_$, e) => {
     const text = files[under(e.path)]
@@ -58,6 +71,12 @@ const world = (
     seen.statuses.push(e.text)
 
     return { value: undefined }
+  })
+  // What stands beneath the mod where it leaves the band to the engine.
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{NO_BAND}</Text>
   })
   on('ui.open', (_$, e) => {
     seen.opened.push(e.id)
@@ -203,7 +222,7 @@ test('without a .bridge folder the guard still denies', async ($, on) => {
   expect(seen.ran).toEqual(['git push origin feat/x'])
 })
 
-// ---- the status line and the panel
+// ---- no status line
 
 test('without a .bridge folder the mod shows and registers nothing, and still guards', async ($, on) => {
   const clock = mock.clock(on)
@@ -216,26 +235,30 @@ test('without a .bridge folder the mod shows and registers nothing, and still gu
   expect(ran.deny).toBe(DENY)
   expect(seen.statuses).toEqual([])
   expect(seen.commands).toEqual([])
+  for (const surface of BAND_SURFACES) {
+    expect(await bandTexts($, surface)).toEqual([NO_BAND])
+  }
 })
 
-test('the status line counts the task files and refreshes every 10 seconds', async ($, on) => {
+test('a busy bridge writes nothing to the status line', async ($, on) => {
   const clock = mock.clock(on)
   const files: Record<string, string> = { ...BRIDGE }
   const seen = world(on, { files })
 
   await $.session.start(START)
   expect(seen.commands).toEqual(['bridge-panel'])
-  expect(seen.statuses.at(-1)).toBe('bridge: 1 running · 2 queued · 1 to review')
-
   delete files['.bridge/inbox/053-next-thing.md']
   files['.bridge/working/053-next-thing.md'] = 'task'
-  await clock.advance(9_000)
-  expect(seen.statuses.at(-1)).toBe('bridge: 1 running · 2 queued · 1 to review')
-  await clock.advance(1_000)
-  expect(seen.statuses.at(-1)).toBe('bridge: 2 running · 1 queued · 1 to review')
+  await clock.advance(30_000)
+  await $.command.run(OPEN)
+  for (const surface of BAND_SURFACES) {
+    await bandTexts($, surface)
+  }
+
+  expect(seen.statuses).toEqual([])
 })
 
-test('the status line clears a minute after the last task ran', async ($, on) => {
+test('a bridge whose tasks all leave never touches the status line', async ($, on) => {
   const clock = mock.clock(on)
   const files: Record<string, string> = {
     '.bridge/working/052-bridge-mod.md': 'task',
@@ -244,22 +267,20 @@ test('the status line clears a minute after the last task ran', async ($, on) =>
   const seen = world(on, { files })
 
   await $.session.start(START)
-  expect(seen.statuses.at(-1)).toBe('bridge: 1 running · 0 queued · 0 to review')
-
   delete files['.bridge/working/052-bridge-mod.md']
-  await clock.advance(50_000)
-  expect(seen.statuses.at(-1)).toBe('bridge: 0 running · 0 queued · 0 to review')
-  await clock.advance(20_000)
-  expect(seen.statuses.at(-1)).toBe(undefined)
+  await clock.advance(120_000)
+
+  expect(seen.statuses).toEqual([])
 })
 
-test('an idle bridge shows no status line', async ($, on) => {
-  mock.clock(on)
+test('an idle bridge writes nothing to the status line', async ($, on) => {
+  const clock = mock.clock(on)
   const seen = world(on, { files: { '.bridge/outbox/session-notes.md': 'notes' } })
 
   await $.session.start(START)
+  await clock.advance(30_000)
 
-  expect(seen.statuses).toEqual([undefined])
+  expect(seen.statuses).toEqual([])
 })
 
 const PANE = {
@@ -275,49 +296,448 @@ const PANE = {
     view: {},
   },
 } as const
+const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
+const OPEN = {
+  command: 'bridge-panel',
+  args: '',
+  origin: { kind: 'composer' },
+  presentation: { isFullscreen: false, columns: 120 },
+} as const
 
-test('/bridge-panel opens a pane listing tasks, doorbell and notes', async ($, on) => {
-  mock.clock(on)
-  const seen = world(on, { files: BRIDGE })
+const NOW = 1_000_000_000
+const NOTES = [
+  '- 2026-10-13 17:20 old one',
+  '- 2026-10-13 17:21 [054] old two',
+  '- 2026-10-13 17:30 [stop] Bridge desligada',
+  '- 2026-10-13 17:31 Bridge ativa',
+  '- 2026-10-13 17:32 [056] Despachada: roda `claude plugin validate`',
+  `- 2026-10-13 17:35 [056] ${'longa '.repeat(200)}`,
+  '- 2026-10-13 17:36 [057] Na fila',
+  '',
+].join('\n')
+const DATED = { ...BRIDGE, '.bridge/outbox/session-notes.md': NOTES }
+const MTIMES = {
+  '.bridge/working/052-bridge-mod.md': NOW - 12_000,
+  '.bridge/inbox/053-next-thing.md': NOW - 3 * 60_000,
+  '.bridge/inbox/054-other.md': NOW - 2 * 3_600_000,
+  '.bridge/outbox/051-done-thing.md': NOW - 4 * 86_400_000,
+}
+
+// ---- the band above the prompt
+
+const BAND = {
+  plugin: 'bridge-mod',
+  component: 'AbovePrompt',
+  props: {
+    hasSurvey: false,
+    isWorking: false,
+    maxRows: 10,
+    bodyColumns: 100,
+    scroll: { offset: 0, bodyRows: 9 },
+    view: {},
+  },
+} as const
+// The two surfaces the engine raises the band on.
+const BAND_SURFACES = ['terminal', 'desktop'] as const
+const HOUR = 3_600_000
+const TASK_FOLDERS = ['working', 'inbox', 'outbox'] as const
+
+// The texts the band draws on a surface; `NO_BAND` alone when the mod draws none.
+const bandTexts = async ($: Parameters<TestBody>[0], surface: 'terminal' | 'desktop') => {
+  const ui = await $.ui.mount({ ...BAND, surface })
+  const texts = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+  await ui.unmount()
+
+  return texts
+}
+
+// A bridge with that many task files per folder, all written long ago.
+const counted = (working: number, inbox: number, outbox: number) => {
+  const files: Record<string, string> = {
+    '.bridge/doorbell': 'trig_abc123\n',
+    '.bridge/outbox/session-notes.md': 'notes',
+  }
+  const mtimes: Record<string, number> = {}
+  ;[working, inbox, outbox].forEach((count, folder) => {
+    for (let index = 0; index < count; index += 1) {
+      const path = `.bridge/${TASK_FOLDERS[folder]}/0${folder}${index}-task.md`
+      files[path] = 'task'
+      mtimes[path] = NOW - 5 * HOUR
+    }
+  })
+
+  return { files, mtimes }
+}
+
+test('the band is hidden on a bridge nothing touched in the last hour', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on, {
+    files: { '.bridge/outbox/session-notes.md': 'notes', '.bridge/doorbell': 'trig_abc123\n' },
+    mtimes: { '.bridge/outbox/session-notes.md': NOW - HOUR },
+  })
 
   await $.session.start(START)
-  const ran = await $.command.run({
-    command: 'bridge-panel',
-    args: '',
-    origin: { kind: 'composer' },
-    presentation: { isFullscreen: false, columns: 120 },
+  for (const surface of BAND_SURFACES) {
+    expect(await bandTexts($, surface)).toEqual([NO_BAND])
+  }
+})
+
+test('the band shows a free bridge that changed in the last hour', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on, {
+    files: { '.bridge/outbox/session-notes.md': 'notes', '.bridge/doorbell': 'trig_abc123\n' },
+    mtimes: { '.bridge/outbox/session-notes.md': NOW - HOUR + 1_000 },
   })
-  expect(ran.text).toBe('Bridge panel opened.')
-  expect(seen.opened).toEqual(['bridge'])
 
-  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
-    const ui = await $.ui.mount({ ...PANE, surface })
-    const text = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+  await $.session.start(START)
+  expect(await bandTexts($, 'desktop')).toEqual(['Ponte', 'ponte livre'])
+  expect((await bandTexts($, 'terminal'))[0]).toBe('● ponte: ponte livre')
+})
 
-    expect(text).toContain('Running (working): 1')
-    expect(text).toContain('  052 bridge-mod')
-    expect(text).toContain('Queued (inbox): 2')
-    expect(text).toContain('  053 next-thing')
-    expect(text).toContain('  054 other')
-    expect(text).toContain('To review (outbox): 1')
-    expect(text).toContain('  051 done-thing')
-    expect(text).toContain('Doorbell: trig_abc123')
-    expect(text).toContain('  n3')
-    expect(text).toContain('  n7')
-    expect(text).not.toContain('  n2')
-    expect(text).not.toContain('  session-notes')
+test('the band shows a bridge with a task however old its files are', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on, counted(0, 1, 0))
+
+  await $.session.start(START)
+  expect(await bandTexts($, 'desktop')).toEqual(['Ponte', '1 na fila'])
+  expect((await bandTexts($, 'terminal'))[0]).toBe('● ponte: 1 na fila')
+})
+
+test('the band stays for an hour after the last task leaves, then hides', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, mtimes } = counted(0, 0, 1)
+  world(on, { files, mtimes })
+
+  await $.session.start(START)
+  expect(await bandTexts($, 'desktop')).toEqual(['Ponte', '1 para revisar'])
+
+  delete files['.bridge/outbox/020-task.md']
+  await clock.advance(10_000)
+  expect(await bandTexts($, 'desktop')).toEqual(['Ponte', 'ponte livre'])
+  await clock.advance(HOUR - 10_000)
+  expect(await bandTexts($, 'desktop')).toEqual(['Ponte', 'ponte livre'])
+  await clock.advance(10_000)
+  for (const surface of BAND_SURFACES) {
+    expect(await bandTexts($, surface)).toEqual([NO_BAND])
+  }
+})
+
+test('the band yields to a survey', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on, { files: DATED, mtimes: MTIMES })
+
+  await $.session.start(START)
+  for (const surface of BAND_SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, hasSurvey: true }, surface })
+    expect((await ui.findAll({ type: 'Text' })).map(found => found.text)).toEqual([NO_BAND])
     await ui.unmount()
   }
 })
 
-test('the pane says when there is no doorbell', async ($, on) => {
-  mock.clock(on)
-  world(on, { files: { '.bridge/inbox/001-first.md': 'task' } })
+const chips = (working: number, inbox: number, outbox: number, expected: string[]) =>
+  test(`the band's chips for ${working} running, ${inbox} queued, ${outbox} to review`, async ($, on) => {
+    mock.clock(on, { now: NOW })
+    world(on, counted(working, inbox, outbox))
+
+    await $.session.start(START)
+    expect(await bandTexts($, 'desktop')).toEqual(['Ponte', ...expected])
+    expect((await bandTexts($, 'terminal'))[0]).toBe(`● ponte: ${expected.join(' · ')}`)
+  })
+
+chips(1, 0, 0, ['1 rodando'])
+chips(0, 2, 0, ['2 na fila'])
+chips(0, 0, 3, ['3 para revisar'])
+chips(2, 0, 1, ['2 rodando', '1 para revisar'])
+chips(1, 2, 0, ['1 rodando', '2 na fila'])
+chips(3, 12, 4, ['3 rodando', '12 na fila', '4 para revisar'])
+
+test('the desktop band colors its chips and the doorbell dot, and animates only while running', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { files, mtimes } = counted(1, 1, 1)
+  world(on, { files, mtimes })
+
+  await $.session.start(START)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const colors = Object.fromEntries(
+    (await ui.findAll({ type: 'Text' })).map(found => [found.text, found.props.color]),
+  )
+  expect(colors['1 rodando']).toBe('#5B9FE8')
+  expect(colors['1 na fila']).toBe('#D9A441')
+  expect(colors['1 para revisar']).toBe('#5DB884')
+  const borders = (await ui.findAll({ type: 'Box' })).map(found => found.props.borderStyle)
+  expect(borders.filter(style => style === 'round')).toHaveLength(3)
+  const drawings = await ui.findAll({ type: 'Svg' })
+  expect(drawings.map(found => found.props.alt)).toEqual(['Campainha ok', 'em andamento'])
+  expect(drawings[0]?.props.source).toContain('#5DB884')
+  expect(drawings[1]?.props.source).toContain('<animate')
+  expect(drawings[1]?.props.isInteractive).toBe(true)
+  await ui.unmount()
+
+  delete files['.bridge/working/000-task.md']
+  delete files['.bridge/doorbell']
+  await $.command.run(OPEN)
+  const quiet = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const still = await quiet.findAll({ type: 'Svg' })
+  expect(still.map(found => found.props.alt)).toEqual(['Sem campainha'])
+  expect(still[0]?.props.source).toContain('#E0645C')
+  expect(still[0]?.props.source).not.toContain('<animate')
+  await quiet.unmount()
+})
+
+test('the terminal band is one line of text with no vector', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on, counted(1, 1, 0))
+
+  await $.session.start(START)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+
+  expect(await ui.findAll({ type: 'Svg' })).toEqual([])
+  expect(await ui.findAll({ type: 'Box' })).toHaveLength(1)
+  expect(await ui.find({ type: 'Text', text: '● ponte: 1 rodando · 1 na fila' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the band follows the bridge at every 10 second refresh', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, mtimes } = counted(0, 1, 0)
+  world(on, { files, mtimes })
+
+  await $.session.start(START)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: '1 na fila' })).toBeDefined()
+
+  delete files['.bridge/inbox/010-task.md']
+  files['.bridge/working/010-task.md'] = 'task'
+  await clock.advance(10_000)
+  expect(await ui.find({ type: 'Text', text: '1 rodando' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '1 na fila' })).toBe(undefined)
+  await ui.unmount()
+})
+
+test('"Abrir painel" opens the bridge pane on both surfaces', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const seen = world(on, { files: DATED, mtimes: MTIMES })
+
+  await $.session.start(START)
+  for (const surface of BAND_SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    const button = await ui.find({ type: 'Button', key: 'open-pane' })
+    expect(button?.props.label).toBe('Abrir painel')
+    await ui.press({ key: 'open-pane' })
+    await ui.unmount()
+  }
+
+  expect(seen.opened).toEqual(['bridge', 'bridge'])
+  expect(seen.writes).toEqual([])
+})
+
+// ---- the pane's formatting
+
+test('ago says how long ago in seconds, minutes, hours and days', () => {
+  expect(ago(0)).toBe('há 0s')
+  expect(ago(59_999)).toBe('há 59s')
+  expect(ago(60_000)).toBe('há 1 min')
+  expect(ago(3 * 60_000 + 20_000)).toBe('há 3 min')
+  expect(ago(59 * 60_000)).toBe('há 59 min')
+  expect(ago(3_600_000)).toBe('há 1 h')
+  expect(ago(23 * 3_600_000)).toBe('há 23 h')
+  expect(ago(86_400_000)).toBe('há 1 d')
+  expect(ago(9 * 86_400_000)).toBe('há 9 d')
+  expect(ago(-5_000)).toBe('há 0s')
+})
+
+test('taskLabel splits the number from the slug and reads dashes as spaces', () => {
+  expect(taskLabel('052-bridge-mod.md')).toEqual({ number: '052', words: 'bridge mod' })
+  expect(taskLabel('057-pane-design.md')).toEqual({ number: '057', words: 'pane design' })
+  expect(taskLabel('7-a--b.md')).toEqual({ number: '7', words: 'a b' })
+  expect(taskLabel('no-number.md')).toEqual({ number: '', words: 'no number' })
+  expect(taskLabel('notes.md')).toEqual({ number: '', words: 'notes' })
+})
+
+test('parseNote reads the time, the optional tag and the text', () => {
+  expect(parseNote('- 2026-10-13 17:35 [056] Concluída (done)')).toEqual({
+    time: '17:35',
+    tag: '[056]',
+    text: 'Concluída (done)',
+  })
+  expect(parseNote('- 2026-10-13 17:30 Bridge ativa. [058] na fila')).toEqual({
+    time: '17:30',
+    tag: '',
+    text: 'Bridge ativa. [058] na fila',
+  })
+  expect(parseNote('free text')).toEqual({ time: '', tag: '', text: 'free text' })
+})
+
+test('lastNotes keeps the last entries and joins indented lines to theirs', () => {
+  expect(lastNotes('a\nb\n\nc\n  more of c\nd\n', 3)).toEqual(['b', 'c more of c', 'd'])
+  expect(lastNotes('', 5)).toEqual([])
+})
+
+test('clamp cuts to three lines and closes an open code span', () => {
+  expect(clamp('short', 10)).toBe('short')
+  expect(clamp('x'.repeat(31), 10)).toBe(`${'x'.repeat(29)}…`)
+  expect(clamp(`${'x'.repeat(25)}\`code span\``, 10)).toBe(`${'x'.repeat(25)}\`cod\`…`)
+})
+
+// ---- the pane
+
+test('/bridge-panel opens a pane that draws on every surface', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const seen = world(on, { files: DATED, mtimes: MTIMES })
+
+  await $.session.start(START)
+  const ran = await $.command.run(OPEN)
+  expect(ran.text).toBe('Bridge panel opened.')
+  expect(seen.opened).toEqual(['bridge'])
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const text = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+    const all = text.join('\n')
+
+    // the header: project, doorbell and how fresh the reading is
+    expect(text).toContain('project')
+    expect(text).toContain('Campainha ok')
+    expect(all).toContain('atualizado há 0s')
+    // each task: number, slug in words, age from its mtime
+    for (const shown of ['há 12s', 'há 3 min', 'há 2 h', 'há 4 d']) {
+      expect(text).toContain(shown)
+    }
+    for (const shown of ['052', '053', '054', '051', 'bridge mod', 'next thing', 'done thing']) {
+      expect(all).toContain(shown)
+    }
+    expect(all).not.toContain('session-notes')
+    expect(all).not.toContain('session notes')
+    // the last five notes, newest first, as markdown clamped to three lines
+    const notes = (await ui.findAll({ type: 'Markdown' })).map(found => found.text)
+    expect(notes).toHaveLength(5)
+    expect(notes[0]).toBe('Na fila')
+    expect(notes[2]).toBe('Despachada: roda `claude plugin validate`')
+    expect(notes[4]).toBe('Bridge desligada')
+    expect(notes[1]?.endsWith('…')).toBe(true)
+    expect((notes[1] ?? '').length <= 3 * 80).toBe(true)
+    expect(all).toContain('17:36')
+    expect(all).toContain('[057]')
+    expect(all).toContain('[stop]')
+    await ui.unmount()
+  }
+})
+
+test('the terminal draws aligned text and no vector', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on, { files: DATED, mtimes: MTIMES })
 
   await $.session.start(START)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const text = (await ui.findAll({ type: 'Text' })).map(found => found.text)
 
-  expect(await ui.find({ type: 'Text', text: 'Doorbell: no doorbell' })).toBeDefined()
+  expect(await ui.findAll({ type: 'Svg' })).toEqual([])
+  expect(text).toContain('project  Campainha ok · atualizado há 0s')
+  expect(text).toContain('Na fila (2)')
+  expect(text).toContain('  053  next thing  há 3 min')
+  expect(text).toContain('  054  other       há 2 h')
+  expect(text).toContain('Rodando (1)')
+  expect(text).toContain('  052  bridge mod  há 12s')
+  expect(text).toContain('Para revisar (1)')
+  expect(text).toContain('  051  done thing  há 4 d')
+  expect(text).toContain('Últimas notas')
+  expect(text).toContain('17:36 [057]')
+  await ui.unmount()
+})
+
+test('the dashboard draws three cards with a large count each', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on, { files: DATED, mtimes: MTIMES })
+
+  await $.session.start(START)
+  for (const surface of ['desktop', 'vscode', 'mobile'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const alts = (await ui.findAll({ type: 'Svg' })).map(found => found.props.alt)
+    const titles = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+
+    expect(alts).toContain('Na fila: 2')
+    expect(alts).toContain('Rodando: 1')
+    expect(alts).toContain('Para revisar: 1')
+    expect(titles).toContain('Na fila')
+    expect(titles).toContain('Rodando')
+    expect(titles).toContain('Para revisar')
+    expect(titles).toContain('Últimas notas')
+    await ui.unmount()
+  }
+})
+
+test('the cards stack in a narrow pane and sit side by side in a wide one', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on, { files: DATED, mtimes: MTIMES })
+
+  await $.session.start(START)
+  const directions = async (bodyColumns: number) => {
+    const ui = await $.ui.mount({
+      ...PANE,
+      props: { ...PANE.props, bodyColumns },
+      surface: 'desktop',
+    })
+    const boxes = await ui.findAll({ type: 'Box' })
+    await ui.unmount()
+
+    return boxes.map(found => found.props.flexDirection)
+  }
+
+  expect(await directions(60)).not.toContain('row')
+  expect(await directions(120)).toContain('row')
+})
+
+test('an empty bridge says so in every column and in the notes', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on, { files: { '.bridge/state.md': 'state' } })
+
+  await $.session.start(START)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const text = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+
+    expect(text.filter(shown => shown.trim() === 'nada aqui')).toHaveLength(4)
+    expect(text.join('\n')).toContain('Sem campainha')
+    expect(text.join('\n')).not.toContain('Campainha ok')
+    expect(await ui.findAll({ type: 'Markdown' })).toEqual([])
+    if (surface === 'terminal') {
+      expect(text).toContain('Na fila (0)')
+    } else {
+      const alts = (await ui.findAll({ type: 'Svg' })).map(found => found.props.alt)
+      expect(alts).toContain('Na fila: 0')
+      expect(alts).toContain('Rodando: 0')
+      expect(alts).toContain('Para revisar: 0')
+    }
+    await ui.unmount()
+  }
+})
+
+test('without a .bridge folder the pane says so on every surface', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on)
+
+  await $.session.start(START)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+
+    expect(
+      await ui.find({ type: 'Text', text: 'Sem pasta .bridge neste projeto.' }),
+    ).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('the pane ages its tasks at every 10 second refresh', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, { files: DATED, mtimes: MTIMES })
+
+  await $.session.start(START)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: 'há 12s' })).toBeDefined()
+
+  await clock.advance(10_000)
+  expect(await ui.find({ type: 'Text', text: 'há 22s' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'há 12s' })).toBe(undefined)
   await ui.unmount()
 })
 
@@ -327,12 +747,16 @@ test('the mod never writes a bridge file', async ($, on) => {
 
   await $.session.start(START)
   await clock.advance(30_000)
-  await $.command.run({
-    command: 'bridge-panel',
-    args: '',
-    origin: { kind: 'composer' },
-    presentation: { isFullscreen: false, columns: 120 },
-  })
+  await $.command.run(OPEN)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.unmount()
+  }
+  for (const surface of BAND_SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    await ui.press({ key: 'open-pane' })
+    await ui.unmount()
+  }
 
   expect(seen.writes).toEqual([])
 })

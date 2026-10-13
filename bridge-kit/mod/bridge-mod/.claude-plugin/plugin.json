@@ -1,7 +1,7 @@
 {
   "name": "bridge-mod",
   "version": "0.1.0",
-  "description": "Cowork bridge status line and panel, plus a guard that blocks git pushes to main/master.",
+  "description": "Cowork bridge band above the prompt and panel, plus a guard that blocks git pushes to main/master.",
   "author": { "name": "Luciano Souza" },
   "types": "./types/index.d.ts"
 }
