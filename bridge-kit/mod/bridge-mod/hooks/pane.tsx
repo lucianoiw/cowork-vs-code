@@ -8,9 +8,9 @@ import { ago, clamp, parseNote, taskLabel } from './format'
 
 type Kind = 'queued' | 'running' | 'review'
 
-const COLUMNS: { kind: Kind; title: string; folder: 'inbox' | 'working' | 'outbox' }[] = [
-  { kind: 'queued', title: 'Na fila', folder: 'inbox' },
-  { kind: 'running', title: 'Rodando', folder: 'working' },
+const COLUMNS: { kind: Kind; title: string; folder: 'queued' | 'running' | 'outbox' }[] = [
+  { kind: 'queued', title: 'Na fila', folder: 'queued' },
+  { kind: 'running', title: 'Rodando', folder: 'running' },
   { kind: 'review', title: 'Para revisar', folder: 'outbox' },
 ]
 const EMPTY = 'nada aqui'

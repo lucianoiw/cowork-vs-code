@@ -2,7 +2,18 @@ import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { ago, clamp, lastNotes, parseNote, taskLabel } from '../hooks/format'
+import { bar, barSegments } from '../hooks/band'
+import {
+  ago,
+  clamp,
+  clip,
+  elapsed,
+  lastNotes,
+  listedUnder,
+  parseNote,
+  splitTasks,
+  taskLabel,
+} from '../hooks/format'
 
 const DENY =
   'bridge-mod: pushing to main/master is blocked; changes reach main only through a PR.'
@@ -351,6 +362,12 @@ const bandTexts = async ($: Parameters<TestBody>[0], surface: 'terminal' | 'desk
   return texts
 }
 
+// The desktop band's label and chips, without the tasks and the note beside them.
+const bandChips = async ($: Parameters<TestBody>[0]) =>
+  (await bandTexts($, 'desktop')).filter(text =>
+    /^(Ponte|ponte livre|\d+ (rodando|na fila|para revisar))$/.test(text),
+  )
+
 // A bridge with that many task files per folder, all written long ago.
 const counted = (working: number, inbox: number, outbox: number) => {
   const files: Record<string, string> = {
@@ -390,7 +407,7 @@ test('the band shows a free bridge that changed in the last hour', async ($, on)
   })
 
   await $.session.start(START)
-  expect(await bandTexts($, 'desktop')).toEqual(['Ponte', 'ponte livre'])
+  expect(await bandChips($)).toEqual(['Ponte', 'ponte livre'])
   expect((await bandTexts($, 'terminal'))[0]).toBe('● ponte: ponte livre')
 })
 
@@ -399,7 +416,7 @@ test('the band shows a bridge with a task however old its files are', async ($, 
   world(on, counted(0, 1, 0))
 
   await $.session.start(START)
-  expect(await bandTexts($, 'desktop')).toEqual(['Ponte', '1 na fila'])
+  expect(await bandChips($)).toEqual(['Ponte', '1 na fila'])
   expect((await bandTexts($, 'terminal'))[0]).toBe('● ponte: 1 na fila')
 })
 
@@ -409,13 +426,13 @@ test('the band stays for an hour after the last task leaves, then hides', async 
   world(on, { files, mtimes })
 
   await $.session.start(START)
-  expect(await bandTexts($, 'desktop')).toEqual(['Ponte', '1 para revisar'])
+  expect(await bandChips($)).toEqual(['Ponte', '1 para revisar'])
 
   delete files['.bridge/outbox/020-task.md']
   await clock.advance(10_000)
-  expect(await bandTexts($, 'desktop')).toEqual(['Ponte', 'ponte livre'])
+  expect(await bandChips($)).toEqual(['Ponte', 'ponte livre'])
   await clock.advance(HOUR - 10_000)
-  expect(await bandTexts($, 'desktop')).toEqual(['Ponte', 'ponte livre'])
+  expect(await bandChips($)).toEqual(['Ponte', 'ponte livre'])
   await clock.advance(10_000)
   for (const surface of BAND_SURFACES) {
     expect(await bandTexts($, surface)).toEqual([NO_BAND])
@@ -440,7 +457,7 @@ const chips = (working: number, inbox: number, outbox: number, expected: string[
     world(on, counted(working, inbox, outbox))
 
     await $.session.start(START)
-    expect(await bandTexts($, 'desktop')).toEqual(['Ponte', ...expected])
+    expect(await bandChips($)).toEqual(['Ponte', ...expected])
     expect((await bandTexts($, 'terminal'))[0]).toBe(`● ponte: ${expected.join(' · ')}`)
   })
 
@@ -461,13 +478,20 @@ test('the desktop band colors its chips and the doorbell dot, and animates only 
   const colors = Object.fromEntries(
     (await ui.findAll({ type: 'Text' })).map(found => [found.text, found.props.color]),
   )
-  expect(colors['1 rodando']).toBe('#5B9FE8')
-  expect(colors['1 na fila']).toBe('#D9A441')
-  expect(colors['1 para revisar']).toBe('#5DB884')
-  const borders = (await ui.findAll({ type: 'Box' })).map(found => found.props.borderStyle)
-  expect(borders.filter(style => style === 'round')).toHaveLength(3)
+  // filled chips: white text on the status color, blue, amber, green
+  for (const chip of ['1 rodando', '1 na fila', '1 para revisar']) {
+    expect(colors[chip]).toBe('#FFFFFF')
+  }
+  const fills = (await ui.findAll({ type: 'Box' }))
+    .filter(found => found.props.borderStyle === 'round')
+    .map(found => found.props.backgroundColor)
+  expect(fills).toEqual(['#2B6CD4', '#946200', '#1E7D4B'])
   const drawings = await ui.findAll({ type: 'Svg' })
-  expect(drawings.map(found => found.props.alt)).toEqual(['Campainha ok', 'em andamento'])
+  expect(drawings.map(found => found.props.alt)).toEqual([
+    'Campainha ok',
+    'em andamento',
+    'Na fila 1, rodando 1, para revisar 1',
+  ])
   expect(drawings[0]?.props.source).toContain('#5DB884')
   expect(drawings[1]?.props.source).toContain('<animate')
   expect(drawings[1]?.props.isInteractive).toBe(true)
@@ -478,10 +502,257 @@ test('the desktop band colors its chips and the doorbell dot, and animates only 
   await $.command.run(OPEN)
   const quiet = await $.ui.mount({ ...BAND, surface: 'desktop' })
   const still = await quiet.findAll({ type: 'Svg' })
-  expect(still.map(found => found.props.alt)).toEqual(['Sem campainha'])
+  expect(still.map(found => found.props.alt)).toEqual([
+    'Sem campainha',
+    'Na fila 1, rodando 0, para revisar 1',
+  ])
   expect(still[0]?.props.source).toContain('#E0645C')
   expect(still[0]?.props.source).not.toContain('<animate')
   await quiet.unmount()
+})
+
+// ---- band v2: the real split, the running tasks, the note and the bar
+
+const STATE = [
+  '# Bridge state (written by the dispatcher; 2026-10-13)',
+  '',
+  '## Running',
+  '- 064-demo.md (worktree isolation, Branch: feat/demo; waits on 063-other.md)',
+  '- 065 a-very-long-task-name-here (shared)',
+  '',
+  '## Queue',
+  '- 066-pr.md (Action: pr feat/demo) waits for 064',
+  '',
+  '## Done this session',
+  '- 060-old.md done',
+  '',
+].join('\n')
+const task = (file: string, mtimeMs = 1) => ({ file, mtimeMs })
+
+test('listedUnder reads the task of each bullet under one heading of state.md', () => {
+  expect(listedUnder(STATE, 'Running')).toEqual(['064-demo.md', '065'])
+  expect(listedUnder(STATE, 'Queue')).toEqual(['066-pr.md'])
+  expect(listedUnder(STATE, 'Missing')).toEqual([])
+  expect(listedUnder('## Running\n(none)\n', 'Running')).toEqual([])
+})
+
+test('splitTasks runs only what state.md lists as running and queues the rest', () => {
+  const working = [
+    task('064-demo.md'),
+    task('065-a-very-long-task-name-here.md'),
+    task('066-pr.md'),
+    task('067-unlisted.md'),
+  ]
+  const split = splitTasks(working, [task('068-new.md'), task('010-early.md')], STATE)
+
+  expect(split.running.map(one => one.file)).toEqual([
+    '064-demo.md',
+    '065-a-very-long-task-name-here.md',
+  ])
+  expect(split.queued.map(one => one.file)).toEqual([
+    '010-early.md',
+    '066-pr.md',
+    '067-unlisted.md',
+    '068-new.md',
+  ])
+})
+
+test('splitTasks falls back to the folders only without a state.md', () => {
+  const working = [task('064-demo.md'), task('066-pr.md')]
+  const inbox = [task('068-new.md')]
+
+  expect(splitTasks(working, inbox, null)).toEqual({ running: working, queued: inbox })
+  expect(splitTasks(working, inbox, '## Running\n(none)\n')).toEqual({
+    running: [],
+    queued: [task('064-demo.md'), task('066-pr.md'), task('068-new.md')],
+  })
+})
+
+test('elapsed is a clock of minutes and seconds, with hours when there are any', () => {
+  expect(elapsed(0)).toBe('0:00')
+  expect(elapsed(7_999)).toBe('0:07')
+  expect(elapsed(72_000)).toBe('1:12')
+  expect(elapsed(59 * 60_000 + 59_000)).toBe('59:59')
+  expect(elapsed(3_600_000 + 2 * 60_000 + 5_000)).toBe('1:02:05')
+  expect(elapsed(-5_000)).toBe('0:00')
+})
+
+test('clip cuts one line to a length and ends it with an ellipsis', () => {
+  expect(clip('short', 10)).toBe('short')
+  expect(clip('exactly 10', 10)).toBe('exactly 10')
+  expect(clip('a very long task name here', 16)).toBe('a very long tas…')
+  expect(clip('word then cut', 6)).toBe('word…')
+})
+
+test('barSegments shares the bar by count, in the order queued, running, to review', () => {
+  expect(barSegments([0, 0, 0]).map(one => one.width)).toEqual([0, 0, 0])
+  expect(barSegments([0, 2, 0])).toEqual([
+    { x: 0, width: 0 },
+    { x: 0, width: 2000 },
+    { x: 2000, width: 0 },
+  ])
+  // a gap of 6 between segments, the last one ending at the bar's end
+  expect(barSegments([1, 3, 2])).toEqual([
+    { x: 0, width: 331 },
+    { x: 337, width: 994 },
+    { x: 1337, width: 663 },
+  ])
+  expect(barSegments([2, 0, 2])).toEqual([
+    { x: 0, width: 997 },
+    { x: 1003, width: 0 },
+    { x: 1003, width: 997 },
+  ])
+})
+
+// Four tasks in working/ of which state.md runs three, as in the screenshot.
+const LIVE = {
+  files: {
+    '.bridge/doorbell': 'trig_abc123\n',
+    '.bridge/state.md': STATE.replace('## Queue', '- 063-first.md\n\n## Queue'),
+    '.bridge/working/063-first.md': 'task',
+    '.bridge/working/064-demo.md': 'task',
+    '.bridge/working/065-a-very-long-task-name-here.md': 'task',
+    '.bridge/working/066-pr.md': 'task',
+    '.bridge/outbox/061-done.md': 'report',
+    '.bridge/outbox/062-done.md': 'report',
+    '.bridge/outbox/session-notes.md': `${NOTES}- 2026-10-13 17:40 [064] ${'Despachada e rodando '.repeat(8)}\n`,
+  },
+  mtimes: {
+    '.bridge/working/063-first.md': NOW - 3_725_000,
+    '.bridge/working/064-demo.md': NOW - 72_000,
+    '.bridge/working/065-a-very-long-task-name-here.md': NOW - 7_000,
+    '.bridge/working/066-pr.md': NOW - 5_000,
+  },
+}
+
+test('the band counts as running only what state.md runs, on both surfaces', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on, LIVE)
+
+  await $.session.start(START)
+  expect(await bandChips($)).toEqual(['Ponte', '3 rodando', '1 na fila', '2 para revisar'])
+  expect((await bandTexts($, 'terminal'))[0]).toBe(
+    '● ponte: 3 rodando · 1 na fila · 2 para revisar',
+  )
+})
+
+test('the pane puts a task waiting in working/ under the queue', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on, LIVE)
+
+  await $.session.start(START)
+  const terminal = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const text = (await terminal.findAll({ type: 'Text' })).map(found => found.text)
+  expect(text).toContain('Na fila (1)')
+  expect(text).toContain('Rodando (3)')
+  expect(text.indexOf('Na fila (1)') < text.findIndex(shown => shown.includes('066'))).toBe(true)
+  expect(text.findIndex(shown => shown.includes('066')) < text.indexOf('Rodando (3)')).toBe(true)
+  await terminal.unmount()
+
+  for (const surface of ['desktop', 'vscode', 'mobile'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const alts = (await ui.findAll({ type: 'Svg' })).map(found => found.props.alt)
+    expect(alts).toContain('Na fila: 1')
+    expect(alts).toContain('Rodando: 3')
+    expect(alts).toContain('Para revisar: 2')
+    await ui.unmount()
+  }
+})
+
+test('the desktop band names the running tasks with their clocks, cut to fit', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on, LIVE)
+
+  await $.session.start(START)
+  const wide = await $.ui.mount({
+    ...BAND,
+    props: { ...BAND.props, bodyColumns: 200 },
+    surface: 'desktop',
+  })
+  const texts = (await wide.findAll({ type: 'Text' })).map(found => found.text)
+  expect(texts.slice(4, 13)).toEqual([
+    '063', 'first', '· 1:02:05',
+    '064', 'demo', '· 1:12',
+    '065', 'a very long tas…', '· 0:07',
+  ])
+  // the queued task is not named, and the last note is cut with an ellipsis
+  expect(texts.join('\n')).not.toContain('066')
+  const note = texts[13] ?? ''
+  expect(note.startsWith('Despachada e rodando')).toBe(true)
+  expect(note.endsWith('…')).toBe(true)
+  expect(note.length <= 60).toBe(true)
+  expect(texts).toHaveLength(14)
+  await wide.unmount()
+
+  // with less room the note goes first, then the tasks that do not fit
+  const narrow = await $.ui.mount({
+    ...BAND,
+    props: { ...BAND.props, bodyColumns: 115 },
+    surface: 'desktop',
+  })
+  expect((await narrow.findAll({ type: 'Text' })).map(found => found.text)).toEqual([
+    'Ponte', '3 rodando', '1 na fila', '2 para revisar',
+    '063', 'first', '· 1:02:05',
+    '064', 'demo', '· 1:12',
+  ])
+  expect(await narrow.find({ type: 'Button', key: 'open-pane' })).toBeDefined()
+  await narrow.unmount()
+})
+
+test('the bar under the band is split in the three colors and slides once on a change', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, mtimes } = counted(1, 1, 2)
+  world(on, { files, mtimes })
+  const barOf = async () => {
+    const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const found = (await ui.findAll({ type: 'Svg' })).pop()
+    await ui.unmount()
+
+    return found?.props
+  }
+
+  await $.session.start(START)
+  const first = await barOf()
+  expect(first?.alt).toBe('Na fila 1, rodando 1, para revisar 2')
+  expect(first?.height).toBe(3)
+  for (const color of ['#D9A441', '#5B9FE8', '#5DB884']) {
+    expect(first?.source).toContain(`fill="${color}"`)
+  }
+  expect(first?.source).not.toContain('<animate')
+  expect(first?.isInteractive).toBe(undefined)
+  expect(first?.source).toBe(bar([1, 1, 2], null))
+
+  delete files['.bridge/inbox/010-task.md']
+  await clock.advance(10_000)
+  const moved = await barOf()
+  expect(moved?.alt).toBe('Na fila 0, rodando 1, para revisar 2')
+  expect(moved?.source).toBe(bar([0, 1, 2], [1, 1, 2]))
+  expect(moved?.source).toContain('<animate attributeName="width"')
+  expect(moved?.isInteractive).toBe(true)
+
+  await clock.advance(10_000)
+  const settled = await barOf()
+  expect(settled?.source).toBe(bar([0, 1, 2], null))
+  expect(settled?.isInteractive).toBe(undefined)
+})
+
+test('a free bridge draws an empty bar and no task', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  world(on, {
+    files: { '.bridge/outbox/session-notes.md': '', '.bridge/doorbell': 'trig_abc123\n' },
+    mtimes: { '.bridge/outbox/session-notes.md': NOW - 1_000 },
+  })
+
+  await $.session.start(START)
+  expect(await bandTexts($, 'desktop')).toEqual(['Ponte', 'ponte livre'])
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawings = await ui.findAll({ type: 'Svg' })
+  expect(drawings.map(found => found.props.alt)).toEqual([
+    'Campainha ok',
+    'Na fila 0, rodando 0, para revisar 0',
+  ])
+  expect(drawings[1]?.props.source).toBe(bar([0, 0, 0], null))
+  await ui.unmount()
 })
 
 test('the terminal band is one line of text with no vector', async ($, on) => {
