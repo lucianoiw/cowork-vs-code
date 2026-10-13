@@ -4,3 +4,4 @@ node_modules/
 .claude/worktrees/
 *.zip
 .DS_Store
+bridge-kit/mod/*/.claude-plugin/types/

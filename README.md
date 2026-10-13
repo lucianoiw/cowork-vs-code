@@ -54,6 +54,7 @@ Several Cowork conversations on one project (for example an orchestrator that dr
 | `bridge-kit/pre-push` | Git hook that refuses pushes to `main`/`master` |
 | `bridge-kit/install.sh` | Copies the skill, watcher and hook to `~/.claude/skills/bridge/` |
 | `bridge-kit/cowork-skill/code-bridge/SKILL.md` | The Cowork-side skill (task writing, doorbell, review, PR flow) |
+| `bridge-kit/mod/bridge-mod/` | Optional Claude Code mod: bridge status line, panel and main-push guard |
 | `*.js`, `*.test.js` | Small fixtures used to test the bridge |
 
 ## Setup
@@ -66,6 +67,22 @@ Several Cowork conversations on one project (for example an orchestrator that dr
 6. Ask Cowork to send work to the Code.
 
 To turn the bridge off without closing the Code session, type `/bridge stop` there (or have Cowork create `.bridge/stop`). Running subagents finish and report as usual; pending tasks stay in `inbox/` until `/bridge` runs again.
+
+## Optional: bridge-mod
+
+`bridge-kit/mod/bridge-mod/` is a Claude Code mod (a plugin of function hooks) for the Code side. Its status line and panel only appear in a session whose working directory has a `.bridge/` folder; its push guard works in every project once the mod is loaded, with or without `.bridge/`. It never writes or moves bridge files.
+
+- **Status line**: `bridge: <R> running · <Q> queued · <O> to review`, the task files in `.bridge/working/`, `inbox/` and `outbox/`, refreshed every 10 seconds and cleared once all three are empty and nothing ran in the last minute.
+- **`/bridge-panel`**: opens a pane listing each task file by folder (number and slug), the doorbell id from `.bridge/doorbell` (or "no doorbell") and the last 5 lines of `.bridge/outbox/session-notes.md`.
+- **Push guard** (every project, not only bridge ones, so it backs up a global `Bash(git push:*)` allow rule where there is no `pre-push` hook): a Bash call with a `git push` whose destination is `main` or `master` is denied (`main`, `HEAD:main`, `refs/heads/main`, `+main`, `:main`, `--delete main`, `--all`, `--mirror`, forced or not), and so is a push with no refspec while the current branch is `main` or `master`. A push whose destination it cannot read (a shell variable, an unknown directory) is denied too. It reads the command's spelling, so it is a second line beside the `pre-push` hook, not a replacement: a git alias or a script that pushes is only stopped by the hook.
+
+To enable it, name the mod's folder in `CLAUDE_CODE_PLUGIN_DIRS`, in the `env` block of `~/.claude/settings.json` (absolute path, `~` allowed), and start a new session:
+
+```json
+{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "~/Projects/cowork-vs-code/bridge-kit/mod/bridge-mod" } }
+```
+
+It is read from that folder, so a `git pull` updates it. Check it with `claude plugin validate bridge-kit/mod/bridge-mod` and `claude plugin test bridge-kit/mod/bridge-mod`. The test file is named `.test.tsx` so that `node --test` (which also collects `*.test.ts`) leaves it to `claude plugin test`.
 
 ## Caveats
 
