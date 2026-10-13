@@ -20,7 +20,7 @@ const NO_BRIDGE = 'Sem pasta .bridge neste projeto.'
 const WIDE_COLUMNS = 84
 
 // Color is kept for status alone; everything else follows the app's theme.
-const HEX = {
+export const HEX = {
   queued: '#D9A441',
   running: '#5B9FE8',
   review: '#5DB884',
@@ -28,7 +28,7 @@ const HEX = {
   off: '#E0645C',
   quiet: '#8A8A85',
 }
-const THEME = {
+export const THEME = {
   queued: 'warning',
   running: 'suggestion',
   review: 'success',

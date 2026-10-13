@@ -54,7 +54,7 @@ Several Cowork conversations on one project (for example an orchestrator that dr
 | `bridge-kit/pre-push` | Git hook that refuses pushes to `main`/`master` |
 | `bridge-kit/install.sh` | Copies the skill, watcher and hook to `~/.claude/skills/bridge/` |
 | `bridge-kit/cowork-skill/code-bridge/SKILL.md` | The Cowork-side skill (task writing, doorbell, review, PR flow) |
-| `bridge-kit/mod/bridge-mod/` | Optional Claude Code mod: bridge status line, panel and main-push guard |
+| `bridge-kit/mod/bridge-mod/` | Optional Claude Code mod: bridge band above the prompt, panel and main-push guard |
 | `*.js`, `*.test.js` | Small fixtures used to test the bridge |
 
 ## Setup
@@ -70,9 +70,9 @@ To turn the bridge off without closing the Code session, type `/bridge stop` the
 
 ## Optional: bridge-mod
 
-`bridge-kit/mod/bridge-mod/` is a Claude Code mod (a plugin of function hooks) for the Code side. Its status line and panel only appear in a session whose working directory has a `.bridge/` folder; its push guard works in every project once the mod is loaded, with or without `.bridge/`. It never writes or moves bridge files.
+`bridge-kit/mod/bridge-mod/` is a Claude Code mod (a plugin of function hooks) for the Code side. Its band and panel only appear in a session whose working directory has a `.bridge/` folder; its push guard works in every project once the mod is loaded, with or without `.bridge/`. It never writes or moves bridge files.
 
-- **Status line**: `bridge: <R> running · <Q> queued · <O> to review`, the task files in `.bridge/working/`, `inbox/` and `outbox/`, refreshed every 10 seconds and cleared once all three are empty and nothing ran in the last minute.
+- **Band above the prompt** (labels in PT-BR; nothing is written to the status line): shown while a task file sits in `.bridge/working/`, `inbox/` or `outbox/`, or something there changed in the last hour (a file written, a task come or gone), and refreshed every 10 seconds. On the left, "Ponte" with a doorbell dot (green when `.bridge/doorbell` has an id, red otherwise); in the middle, one rounded chip per non-zero count, blue "N rodando", amber "N na fila", green "N para revisar", or a single muted "ponte livre" when all three are zero; on the right, an "Abrir painel" button that opens the pane below. The desktop draws the chips in color, with a pulsing dot on the blue one while something runs; the terminal draws one line of text, such as `● ponte: 1 rodando · 2 na fila  Abrir painel`.
 - **`/bridge-panel`**: opens a read-only pane (labels in PT-BR), redrawn every 10 seconds: the project name and a doorbell pill ("Campainha ok" when `.bridge/doorbell` has an id, "Sem campainha" otherwise); three columns, "Na fila" (inbox), "Rodando" (working) and "Para revisar" (outbox), each with its count and one chip per task (number, slug in words, age from the file's mtime); and "Últimas notas", the last 5 entries of `.bridge/outbox/session-notes.md`, newest first, as Markdown clamped to 3 lines. The desktop, VS Code and mobile surfaces draw it as a dashboard (cards side by side from 84 columns, stacked below that); the terminal draws compact aligned text.
 - **Push guard** (every project, not only bridge ones, so it backs up a global `Bash(git push:*)` allow rule where there is no `pre-push` hook): a Bash call with a `git push` whose destination is `main` or `master` is denied (`main`, `HEAD:main`, `refs/heads/main`, `+main`, `:main`, `--delete main`, `--all`, `--mirror`, forced or not), and so is a push with no refspec while the current branch is `main` or `master`. A push whose destination it cannot read (a shell variable, an unknown directory) is denied too. It reads the command's spelling, so it is a second line beside the `pre-push` hook, not a replacement: a git alias or a script that pushes is only stopped by the hook.
 

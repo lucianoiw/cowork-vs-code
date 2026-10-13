@@ -8,6 +8,8 @@ export type BridgeSnapshot = {
   doorbell: string | null
   notes: string[]
   refreshedAt: number
+  // when the bridge last changed: a file written, or a task come or gone
+  changedAt: number
 }
 
 declare module 'claude-code' {
