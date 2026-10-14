@@ -29,6 +29,9 @@ type World = {
   isBroken?: boolean
   // what `$.agent.list()` answers; `null`: the list cannot be read
   agents?: AgentInfo[] | null
+  // what the surface answers an unasked `$.ui.open`: false, it waits undrawn
+  // (a terminal under 144 columns, a surface that places no panes)
+  isPlaced?: boolean
 }
 
 // A subagent of the session as `$.agent.list()` gives it.
@@ -43,12 +46,21 @@ const agent = (description: string, status: AgentInfo['status'] = 'running'): Ag
 // from memory, and a record of what the mod showed, ran and (never) wrote.
 const world = (
   on: On,
-  { files = {}, mtimes = {}, branch = 'main', isBroken = false, agents = [] }: World = {},
+  {
+    files = {},
+    mtimes = {},
+    branch = 'main',
+    isBroken = false,
+    agents = [],
+    isPlaced = true,
+  }: World = {},
 ) => {
   const seen = {
     statuses: [] as (string | undefined)[],
     commands: [] as string[],
     opened: [] as string[],
+    toasts: [] as string[],
+    skills: [] as string[],
     ran: [] as string[],
     gitCwds: [] as (string | undefined)[],
     writes: [] as string[],
@@ -100,7 +112,22 @@ const world = (
   on('ui.open', (_$, e) => {
     seen.opened.push(e.id)
 
-    return { value: { isPlaced: true as const } }
+    return {
+      value: isPlaced
+        ? { isPlaced: true as const }
+        : { isPlaced: false as const, reason: 'under 144 columns' },
+    }
+  })
+  on('ui.toast', (_$, e) => {
+    seen.toasts.push(e.text)
+
+    return { value: undefined }
+  })
+  // the /bridge skill itself, beneath the mod
+  on('command.run', { command: 'bridge' }, (_$, e) => {
+    seen.skills.push(e.args)
+
+    return { text: 'skill ran' }
   })
   on('command.register', (_$, e) => {
     seen.commands.push(e.name)
@@ -389,6 +416,56 @@ test('a .bridge folder that appears later opens the pane at the next refresh', a
 
   await clock.advance(30_000)
   expect(seen.opened).toEqual(['bridge'])
+})
+
+test('an auto-open the surface does not place shows the hint toast once', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const seen = world(on, { files: DATED, mtimes: MTIMES, isPlaced: false })
+
+  await $.session.start(START)
+  expect(seen.opened).toEqual(['bridge'])
+  expect(seen.toasts).toEqual(['Ponte ativa: /bridge-panel abre o painel'])
+
+  await clock.advance(60_000)
+  await $.session.start(START)
+  expect(seen.opened).toEqual(['bridge'])
+  expect(seen.toasts).toHaveLength(1)
+})
+
+test('a placed auto-open shows no toast', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const seen = world(on, { files: DATED, mtimes: MTIMES })
+
+  await $.session.start(START)
+  expect(seen.toasts).toEqual([])
+})
+
+test('/bridge opens the pane as asked and still runs the skill; /bridge stop does not', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const seen = world(on, { files: DATED, mtimes: MTIMES, isPlaced: false })
+
+  await $.session.start(START)
+  expect(seen.opened).toEqual(['bridge'])
+
+  const ran = await $.command.run({ ...OPEN, command: 'bridge' })
+  expect(ran.text).toBe('skill ran')
+  expect(seen.opened).toEqual(['bridge', 'bridge'])
+
+  await $.command.run({ ...OPEN, command: 'bridge', args: 'stop' })
+  expect(seen.opened).toEqual(['bridge', 'bridge'])
+  expect(seen.skills).toEqual(['', 'stop'])
+})
+
+test('/bridge runs the skill even before a .bridge folder exists', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const seen = world(on)
+
+  await $.session.start(START)
+  const ran = await $.command.run({ ...OPEN, command: 'bridge' })
+
+  expect(ran.text).toBe('skill ran')
+  expect(seen.opened).toEqual(['bridge'])
+  expect(seen.toasts).toEqual([])
 })
 
 // ---- which tasks run
