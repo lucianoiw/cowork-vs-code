@@ -10,6 +10,8 @@ const BRIDGE = '.bridge'
 const PANE = 'bridge'
 const TITLE = 'Bridge'
 const COMMAND = 'bridge-panel'
+const SKILL = 'bridge'
+const HINT = 'Ponte ativa: /bridge-panel abre o painel'
 const NOTES = 'session-notes.md'
 const TICK_MS = 10_000
 
@@ -54,7 +56,10 @@ const split = async ($: EngineInterface, working: BridgeTask[], inbox: BridgeTas
 type Memo = { isActive: boolean; project: string }
 
 // Reads the bridge folders (never writes them) and shows what they hold. The
-// first time it finds the bridge in a session, it opens the pane.
+// first time it finds the bridge in a session, it opens the pane. That open is
+// unasked (a timer or session.start), so the engine places it only on a wide
+// terminal (144 columns, 110 once asked) or a surface that places panes; when
+// it waits undrawn, a toast says once how to open it.
 const refresh = async ($: EngineInterface, memo: Memo) => {
   if (!(await $.fs.exists(BRIDGE))) {
     return
@@ -87,7 +92,10 @@ const refresh = async ($: EngineInterface, memo: Memo) => {
 
   if (!(await read($, isAutoOpened))) {
     await update($, isAutoOpened, () => true)
-    await $.ui.open({ id: PANE, title: TITLE })
+    const opened = await $.ui.open({ id: PANE, title: TITLE })
+    if (!opened.isPlaced) {
+      $.ui.toast(HINT)
+    }
   }
 }
 
@@ -110,6 +118,18 @@ export const register: Register = on => {
 
     return { text: 'Bridge panel opened.' }
   })
+
+  // `/bridge` (not `/bridge stop`) opens the pane too: an open from the hook
+  // of a command the person typed is asked, so the engine places it at any
+  // width. The skill itself always runs.
+  on('command.run', { command: SKILL }, async ($, e, next) => {
+    if (e.args.trim() !== 'stop') {
+      await refresh($, memo).catch(() => undefined)
+      await $.ui.open({ id: PANE, title: TITLE })
+    }
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const now = await read($, snapshot)
