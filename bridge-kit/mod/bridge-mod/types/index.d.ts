@@ -2,23 +2,24 @@ export type BridgeTask = { file: string; mtimeMs: number }
 
 export type BridgeSnapshot = {
   project: string
-  // listed under `## Running` in state.md (all of working/ without that file)
+  // tasks of working/ and inbox/ whose number a running agent names (from
+  // state.md's `## Running` only when the agent list is unavailable)
   running: BridgeTask[]
-  // inbox/, and whatever sits in working/ without being listed as running
-  queued: BridgeTask[]
+  // the other tasks of working/ and inbox/, waiting for a free slot
+  waiting: BridgeTask[]
+  // reports in outbox/ that Cowork has not read yet
   outbox: BridgeTask[]
   doorbell: string | null
   notes: string[]
   refreshedAt: number
-  // when the bridge last changed: a file written, or a task come or gone
-  changedAt: number
-  // the queued, running and to-review counts before this reading, on the one
-  // reading where they changed; null on every other
-  shift: [number, number, number] | null
 }
 
 declare module 'claude-code' {
   interface PluginState {
-    'bridge-mod': { snapshot: BridgeSnapshot | null }
+    'bridge-mod': {
+      snapshot: BridgeSnapshot | null
+      // the pane opened on its own once this session (kept across reloads)
+      isAutoOpened: boolean
+    }
   }
 }
