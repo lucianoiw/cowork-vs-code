@@ -88,10 +88,6 @@ export const elapsed = (ms: number) => {
     : `${minutes}:${two(seconds % 60)}`
 }
 
-// One line cut to `max` characters, ending in an ellipsis.
-export const clip = (text: string, max: number) =>
-  text.length <= max ? text : `${text.slice(0, Math.max(1, max) - 1).trimEnd()}…`
-
 // The tasks the bullets under `## <heading>` of state.md name, each by its
 // file (`068-band-v2.md`) or, with no file on the line, its leading number.
 export const listedUnder = (state: string, heading: string) => {
@@ -117,12 +113,18 @@ export const listedUnder = (state: string, heading: string) => {
 
 type Task = { file: string; mtimeMs: number }
 
-// Which tasks run and which wait. The watcher moves every task to `working/`
-// at once, so with a state.md only the ones under its `## Running` run and the
-// rest of `working/` waits with `inbox/`; without one, all of `working/` runs.
+const byFile = (a: Task, b: Task) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
+
+// A task number as a key: `075` and `75` are the same task.
+const numberKey = (number: string) => String(Number(number))
+
+// The fallback for when the agent list is unavailable. The watcher moves every
+// task to `working/` at once, so with a state.md only the ones under its
+// `## Running` run and the rest of `working/` waits with `inbox/`; without one,
+// all of `working/` runs.
 export const splitTasks = (working: Task[], inbox: Task[], state: string | null) => {
   if (state === null) {
-    return { running: working, queued: inbox }
+    return { running: working, waiting: inbox }
   }
   const listed = new Set(listedUnder(state, 'Running'))
   const isRunning = (task: Task) =>
@@ -130,8 +132,39 @@ export const splitTasks = (working: Task[], inbox: Task[], state: string | null)
 
   return {
     running: working.filter(isRunning),
-    queued: [...inbox, ...working.filter(task => !isRunning(task))].sort((a, b) =>
-      a.file < b.file ? -1 : a.file > b.file ? 1 : 0,
-    ),
+    waiting: [...inbox, ...working.filter(task => !isRunning(task))].sort(byFile),
   }
+}
+
+type Agent = { status: string; description: string; name?: string }
+
+// The task numbers the running agents name, in their name or description, as
+// `Task 175 inbox conversation`, `175-inbox-conversation` or `[175]`.
+export const runningNumbers = (agents: readonly Agent[]) => {
+  const numbers = new Set<string>()
+  for (const agent of agents) {
+    if (agent.status !== 'running') {
+      continue
+    }
+    for (const text of [agent.name ?? '', agent.description]) {
+      for (const match of text.matchAll(/\btask\s+(\d+)\b|\[(\d+)\]|(?:^|[^\w-])(\d+)-(?=[a-z])/gi)) {
+        numbers.add(numberKey(match[1] ?? match[2] ?? match[3] ?? ''))
+      }
+    }
+  }
+
+  return numbers
+}
+
+// Which tasks of `working/` and `inbox/` run: those whose number a running
+// agent names. The rest wait for a free slot.
+export const splitByAgents = (working: Task[], inbox: Task[], numbers: ReadonlySet<string>) => {
+  const all = [...working, ...inbox].sort(byFile)
+  const isRunning = (task: Task) => {
+    const { number } = taskLabel(task.file)
+
+    return number !== '' && numbers.has(numberKey(number))
+  }
+
+  return { running: all.filter(isRunning), waiting: all.filter(task => !isRunning(task)) }
 }
