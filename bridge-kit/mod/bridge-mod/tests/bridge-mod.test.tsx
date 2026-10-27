@@ -4,7 +4,9 @@ import { expect, mock, test } from 'claude-code/testing'
 import {
   ago,
   clamp,
+  dependsOn,
   elapsed,
+  finishedNumbers,
   lastNotes,
   listedUnder,
   parseNote,
@@ -12,6 +14,7 @@ import {
   splitByAgents,
   splitTasks,
   taskLabel,
+  unmetDepends,
 } from '../hooks/format'
 
 const DENY =
@@ -32,6 +35,10 @@ type World = {
   // what the surface answers an unasked `$.ui.open`: false, it waits undrawn
   // (a terminal under 144 columns, a surface that places no panes)
   isPlaced?: boolean
+  // while above zero, `$.fs.exists` throws and counts down: a refresh that fails
+  failures?: { count: number }
+  // counts `$.agent.list()` calls: one per refresh that reads the folders
+  refreshes?: { count: number }
 }
 
 // A subagent of the session as `$.agent.list()` gives it.
@@ -53,6 +60,8 @@ const world = (
     isBroken = false,
     agents = [],
     isPlaced = true,
+    failures = { count: 0 },
+    refreshes = { count: 0 },
   }: World = {},
 ) => {
   const seen = {
@@ -68,9 +77,14 @@ const world = (
   const under = (path: string) => path.slice(path.indexOf('.bridge'))
 
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
-  on('fs.exists', (_$, e) => ({
-    value: Object.keys(files).some(file => file.startsWith(under(e.path))),
-  }))
+  on('fs.exists', (_$, e) => {
+    if (failures.count > 0) {
+      failures.count -= 1
+      throw new Error('disk gone')
+    }
+
+    return { value: Object.keys(files).some(file => file.startsWith(under(e.path))) }
+  })
   on('fs.list', (_$, e) => ({
     value: Object.keys(files)
       .filter(file => file.startsWith(`${under(e.path)}/`))
@@ -98,6 +112,7 @@ const world = (
     return { value: undefined }
   })
   on('agent.list', () => {
+    refreshes.count += 1
     if (agents === null) {
       throw new Error('no agent list here')
     }
@@ -150,6 +165,7 @@ const world = (
       },
     }
   })
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('tool.call', (_$, e) => {
     seen.ran.push(e.tool === 'Bash' ? e.command : e.tool)
 
@@ -899,4 +915,194 @@ test('the mod never writes a bridge file', async ($, on) => {
   }
 
   expect(seen.writes).toEqual([])
+})
+
+// ---- staying fresh
+
+test('a refresh that throws keeps the last reading, shows its error dimmed, and the next tick works', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const failures = { count: 0 }
+  world(on, { files: DATED, mtimes: MTIMES, agents: RUNS_052, failures })
+
+  await $.session.start(START)
+  failures.count = 1
+  await clock.advance(10_000)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const all = (await ui.findAll({ type: 'Text' })).map(found => found.text).join('\n')
+    expect(all).toContain('atualizado há 10s')
+    expect(all).toContain('erro: ')
+    expect(all).toContain('052')
+    await ui.unmount()
+  }
+  const terminal = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const header = (await terminal.findAll({ type: 'Text' }))[0]?.text ?? ''
+  expect(header.startsWith('project  Campainha ok · atualizado há 10s · erro: ')).toBe(true)
+  await terminal.unmount()
+
+  await clock.advance(10_000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const all = (await ui.findAll({ type: 'Text' })).map(found => found.text).join('\n')
+  expect(all).toContain('atualizado há 0s')
+  expect(all).not.toContain('erro')
+  await ui.unmount()
+})
+
+const TURN = {
+  answer: 'done',
+  durationMs: 1,
+  isAborted: false,
+  turnId: 't1',
+  reason: 'answer',
+} as const
+
+test('the pane refreshes after each tool call and at the end of each turn, between ticks', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const files: Record<string, string> = { ...DATED }
+  world(on, { files, mtimes: MTIMES, agents: RUNS_052 })
+  const queue = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const text = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+    await ui.unmount()
+
+    return text.find(one => one.startsWith('Na fila'))
+  }
+
+  await $.session.start(START)
+  expect(await queue()).toBe('Na fila (3)')
+
+  delete files['.bridge/inbox/054-other.md']
+  await clock.advance(1_000)
+  await $.tool.call({ tool: 'Read', file_path: '/project/x' })
+  await clock.settle()
+  expect(await queue()).toBe('Na fila (2)')
+
+  delete files['.bridge/inbox/053-next-thing.md']
+  await clock.advance(1_000)
+  await $.turn.complete(TURN)
+  await clock.settle()
+  expect(await queue()).toBe('Na fila (1)')
+})
+
+test('a burst of tool calls refreshes at most twice and ends on the last state', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const files: Record<string, string> = { ...DATED }
+  const refreshes = { count: 0 }
+  world(on, { files, mtimes: MTIMES, agents: RUNS_052, refreshes })
+  const queue = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const text = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+    await ui.unmount()
+
+    return text.find(one => one.startsWith('Na fila'))
+  }
+
+  await $.session.start(START)
+  await clock.advance(5_000)
+  refreshes.count = 0
+
+  // ten calls within 1 s; the folders change before the last one
+  for (let call = 0; call < 10; call += 1) {
+    if (call === 9) {
+      delete files['.bridge/inbox/054-other.md']
+    }
+    await $.tool.call({ tool: 'Read', file_path: '/project/x' })
+    await clock.advance(100)
+  }
+  await clock.settle()
+  expect(refreshes.count).toBe(1)
+  expect(await queue()).toBe('Na fila (3)')
+
+  // the trailing refresh, about 2 s after the last call, draws the last state
+  await clock.advance(2_000)
+  await clock.settle()
+  expect(refreshes.count).toBeLessThanOrEqual(2)
+  expect(await queue()).toBe('Na fila (2)')
+})
+
+test('an event re-arms the timer once its ticks stopped', async ($, on) => {
+  // a period refused (a hook on clock.every throws) ends the interval
+  const refused = { isOn: false }
+  on('clock.every', { ms: 10_000 }, (_$, e, next) => {
+    if (refused.isOn) {
+      throw new Error('period refused')
+    }
+
+    return next(e)
+  })
+  const clock = mock.clock(on, { now: NOW })
+  world(on, { files: DATED, mtimes: MTIMES, agents: RUNS_052 })
+  const age = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const text = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+    await ui.unmount()
+
+    return text[0]
+  }
+
+  await $.session.start(START)
+  refused.isOn = true
+  // the period asked before the refusal still fires at 10 s; none after it
+  await clock.advance(60_000)
+  expect(await age()).toContain('atualizado há 50s')
+
+  refused.isOn = false
+  await $.tool.call({ tool: 'Read', file_path: '/project/x' })
+  await clock.settle()
+  expect(await age()).toContain('atualizado há 0s')
+  await clock.advance(10_000)
+  expect(await age()).toContain('atualizado há 0s')
+})
+
+// ---- dependencies
+
+test('dependsOn reads the numbers of the Depends header line', () => {
+  expect(dependsOn('# 074 PR\n\nDepends: 073\n')).toEqual(['073'])
+  expect(dependsOn('# x\nIsolation: shared\nDepends: 003, 004\n')).toEqual(['003', '004'])
+  expect(dependsOn('# x\nSays `Depends: 003` in its body\n')).toEqual([])
+  expect(dependsOn('')).toEqual([])
+})
+
+test('a dependency is met once its number has a file in done/ or read/', () => {
+  const finished = finishedNumbers(['003-subtract.md', 'session-notes-063.md', '13-x.md'])
+  expect(unmetDepends(['003', '004', '013'], finished)).toEqual(['004'])
+})
+
+test('a task of working/ waits for its dependency until done/ or read/ has it', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const files: Record<string, string> = {
+    '.bridge/working/003-first.md': '# 003\n',
+    '.bridge/working/004-second.md': '# 004\n\nDepends: 003\n',
+    '.bridge/working/006-third.md': '# 006\n\nDepends: 002\n',
+    '.bridge/read/002-old.md': 'report',
+  }
+  const mtimes = {
+    '.bridge/working/003-first.md': NOW,
+    '.bridge/working/004-second.md': NOW - 5_000,
+    '.bridge/working/006-third.md': NOW - 5_000,
+  }
+  world(on, { files, mtimes, agents: [agent('Task 003 first')] })
+
+  await $.session.start(START)
+  const terminal = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const text = (await terminal.findAll({ type: 'Text' })).map(found => found.text)
+  expect(text).toContain('  ● 003  first   rodando 0:00')
+  expect(text).toContain('  ○ 004  second  esperando 003 · há 5s')
+  expect(text).toContain('  ○ 006  third   aguardando vaga · há 5s')
+  await terminal.unmount()
+
+  const desktop = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const shown = (await desktop.findAll({ type: 'Text' })).map(found => found.text)
+  expect(shown).toContain('esperando 003 · há 5s')
+  const alts = (await desktop.findAll({ type: 'Svg' })).map(found => found.props.alt)
+  expect(alts).toContain('esperando 003')
+  await desktop.unmount()
+
+  delete files['.bridge/working/003-first.md']
+  files['.bridge/done/003-first.md'] = 'task'
+  await clock.advance(10_000)
+  const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const now = (await after.findAll({ type: 'Text' })).map(found => found.text)
+  expect(now).toContain('  ○ 004  second  aguardando vaga · há 15s')
+  await after.unmount()
 })

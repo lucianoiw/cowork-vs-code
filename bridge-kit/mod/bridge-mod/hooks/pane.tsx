@@ -11,6 +11,8 @@ const OUTBOX_TITLE = 'Entregue ao Cowork'
 const OUTBOX_NOTE = 'Relatórios prontos que o Cowork ainda não leu.'
 const RUNNING = 'rodando'
 const WAITING = 'aguardando vaga'
+const BLOCKED = 'esperando'
+const ERROR = 'erro'
 const EMPTY = 'nada aqui'
 const NOTES_TITLE = 'Últimas notas'
 const NO_BRIDGE = 'Sem pasta .bridge neste projeto.'
@@ -38,6 +40,9 @@ const doorbellLabel = (now: BridgeSnapshot) =>
   now.doorbell === null ? 'Sem campainha' : 'Campainha ok'
 const refreshed = (now: BridgeSnapshot, time: number) =>
   `atualizado ${ago(time - now.refreshedAt)}`
+// The last refresh's failure, if any, shown dimmed beside the age.
+const errorOf = (now: BridgeSnapshot) =>
+  now.error === undefined ? null : `${ERROR}: ${now.error}`
 // Newest first, each as time, tag and text.
 const notesOf = (now: BridgeSnapshot) => [...now.notes].reverse().map(parseNote)
 
@@ -47,11 +52,16 @@ const queueOf = (now: BridgeSnapshot): Queued[] => [
   ...now.running.map(task => ({ ...task, isRunning: true })),
   ...now.waiting.map(task => ({ ...task, isRunning: false })),
 ]
+// A waiting task's reason: the tasks it depends on, or a free slot.
+const waitLabel = (task: BridgeTask) =>
+  task.waitingFor === undefined || task.waitingFor.length === 0
+    ? WAITING
+    : `${BLOCKED} ${task.waitingFor.join(', ')}`
 // What a queued task's chip says on its right: its clock, or how long it waits.
 const stateOf = (task: Queued, time: number) =>
   task.isRunning
     ? `${RUNNING} ${elapsed(time - task.mtimeMs)}`
-    : `${WAITING} · ${ago(time - task.mtimeMs)}`
+    : `${waitLabel(task)} · ${ago(time - task.mtimeMs)}`
 const queueSummary = (now: BridgeSnapshot) =>
   `${now.running.length} ${RUNNING} · ${now.waiting.length} aguardando`
 
@@ -158,6 +168,7 @@ export const drawDashboard = (
         <Box flexDirection="column">
           <Text bold>{now.project}</Text>
           <Text dimColor>{refreshed(now, time)}</Text>
+          {errorOf(now) !== null && <Text dimColor>{errorOf(now)}</Text>}
         </Box>
         <Box borderStyle="round" borderColor={bell} paddingX={1} columnGap={1} alignItems="center">
           <Svg source={icon('bell', bell)} alt="campainha" width={16} height={16} />
@@ -177,7 +188,7 @@ export const drawDashboard = (
           queue.map(task =>
             task.isRunning
               ? chip(task, [pulse(HEX.running), RUNNING], stateOf(task, time), HEX.running)
-              : chip(task, [dot(HEX.waiting), WAITING], stateOf(task, time)),
+              : chip(task, [dot(HEX.waiting), waitLabel(task)], stateOf(task, time)),
           ),
         )}
         {card(
@@ -238,6 +249,7 @@ export const drawText = (
         {'  '}
         <Text color={now.doorbell === null ? THEME.off : THEME.ok}>{doorbellLabel(now)}</Text>
         <Text dimColor>{` · ${refreshed(now, time)}`}</Text>
+        {errorOf(now) !== null && <Text dimColor>{` · ${errorOf(now)}`}</Text>}
       </Text>
 
       <Text bold>{`${QUEUE_TITLE} (${queue.length})`}</Text>

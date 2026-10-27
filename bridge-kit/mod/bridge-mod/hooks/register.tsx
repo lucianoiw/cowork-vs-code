@@ -1,8 +1,16 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { BridgeSnapshot, BridgeTask } from '../types'
-import { lastNotes, runningNumbers, splitByAgents, splitTasks } from './format'
+import {
+  dependsOn,
+  finishedNumbers,
+  lastNotes,
+  runningNumbers,
+  splitByAgents,
+  splitTasks,
+  unmetDepends,
+} from './format'
 import { drawDashboard, drawText } from './pane'
 import { pushChecks } from './push-guard'
 
@@ -14,6 +22,8 @@ const SKILL = 'bridge'
 const HINT = 'Ponte ativa: /bridge-panel abre o painel'
 const NOTES = 'session-notes.md'
 const TICK_MS = 10_000
+// Event refreshes (tool calls, subagent turns) are coalesced to one per this.
+const EVENT_MS = 2_000
 
 const DENY =
   'bridge-mod: pushing to main/master is blocked; changes reach main only through a PR.'
@@ -52,8 +62,46 @@ const split = async ($: EngineInterface, working: BridgeTask[], inbox: BridgeTas
   return splitTasks(working, inbox, state)
 }
 
+// The waiting tasks of working/ whose `Depends:` names a task with no file
+// in done/ or read/ yet carry those numbers in `waitingFor`.
+const withDepends = async ($: EngineInterface, waiting: BridgeTask[], working: BridgeTask[]) => {
+  const inWorking = new Set(working.map(task => task.file))
+  if (!waiting.some(task => inWorking.has(task.file))) {
+    return waiting
+  }
+  const over = await Promise.all(
+    ['done', 'read'].map(folder => $.fs.list(`${BRIDGE}/${folder}`).catch(() => [])),
+  )
+  const finished = finishedNumbers(over.flat().map(entry => entry.name))
+
+  return Promise.all(
+    waiting.map(async task => {
+      if (!inWorking.has(task.file)) {
+        return task
+      }
+      const text = await $.fs.read(`${BRIDGE}/working/${task.file}`).catch(() => '')
+      const missing = unmetDepends(dependsOn(text), finished)
+
+      return missing.length === 0 ? task : { ...task, waitingFor: missing }
+    }),
+  )
+}
+
 // What a refresh remembers between ticks; a reload starts it over.
-type Memo = { isActive: boolean; project: string }
+type Memo = {
+  isActive: boolean
+  project: string
+  // the 10 s timer, and when it last fired (or was armed)
+  timer: Timer | null
+  tickedAt: number
+  // refreshes started, and the newest one that wrote the snapshot, so a slow
+  // refresh never overwrites a newer reading
+  started: number
+  written: number
+  // when an event last refreshed, and the trailing refresh it has pending
+  eventAt: number
+  trailing: Timer | null
+}
 
 // Reads the bridge folders (never writes them) and shows what they hold. The
 // first time it finds the bridge in a session, it opens the pane. That open is
@@ -64,12 +112,16 @@ const refresh = async ($: EngineInterface, memo: Memo) => {
   if (!(await $.fs.exists(BRIDGE))) {
     return
   }
+  const seq = ++memo.started
   if (!memo.isActive) {
-    await $.command.register({
-      name: COMMAND,
-      description: 'Show the Cowork bridge tasks, doorbell and session notes',
-    })
-    memo.isActive = true
+    // A failed registration is tried again at the next refresh and never
+    // keeps the snapshot from being written.
+    memo.isActive = await $.command
+      .register({
+        name: COMMAND,
+        description: 'Show the Cowork bridge tasks, doorbell and session notes',
+      })
+      .then(() => true, () => false)
   }
 
   const [working, inbox, outbox] = await Promise.all([
@@ -79,15 +131,21 @@ const refresh = async ($: EngineInterface, memo: Memo) => {
   ])
   const doorbell = (await $.fs.read(`${BRIDGE}/doorbell`).catch(() => '')).trim()
   const notes = lastNotes(await $.fs.read(`${BRIDGE}/outbox/${NOTES}`).catch(() => ''), 5)
+  const { running, waiting } = await split($, working, inbox)
   const now: BridgeSnapshot = {
     project: memo.project,
-    ...(await split($, working, inbox)),
+    running,
+    waiting: await withDepends($, waiting, working),
     outbox,
     doorbell: doorbell === '' ? null : doorbell,
     notes,
     refreshedAt: await $.clock.now(),
   }
   // Written at every tick, so the pane's ages are drawn again.
+  if (seq < memo.written) {
+    return
+  }
+  memo.written = seq
   await update($, snapshot, () => now)
 
   if (!(await read($, isAutoOpened))) {
@@ -99,21 +157,111 @@ const refresh = async ($: EngineInterface, memo: Memo) => {
   }
 }
 
+// A refresh that never throws: a failure keeps the last reading and puts its
+// message in the snapshot, for the pane header to show dimmed.
+const tick = async ($: EngineInterface, memo: Memo) => {
+  try {
+    await refresh($, memo)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    await update($, snapshot, last => (last === null ? last : { ...last, error: message })).catch(
+      () => undefined,
+    )
+  }
+}
+
+// (Re)starts the 10 s timer. Its periods can end without a reload (a refused
+// period ends the interval), so events arm it again when it went quiet.
+const arm = async ($: EngineInterface, memo: Memo) => {
+  memo.timer?.cancel()
+  memo.tickedAt = await $.clock.now()
+  memo.timer = $.clock.every(TICK_MS, () => {
+    void $.clock
+      .now()
+      .then(time => {
+        memo.tickedAt = time
+      })
+      .catch(() => undefined)
+    void tick($, memo)
+  })
+}
+
+// A refresh on an event of the session, re-arming the timer if it missed
+// three periods. Never throws.
+const poke = async ($: EngineInterface, memo: Memo) => {
+  try {
+    if ((await $.clock.now()) - memo.tickedAt > 3 * TICK_MS) {
+      await arm($, memo)
+    }
+  } catch {
+    // the timer is tried again at the next event
+  }
+  await tick($, memo)
+}
+
+// A poke for events that come in bursts (every tool call of every subagent):
+// at most one per EVENT_MS. An event in a quiet spell refreshes at once; one
+// inside the window (re)schedules a single refresh EVENT_MS after it, so a
+// burst ends with one refresh that draws its final state. Never throws.
+const nudge = async ($: EngineInterface, memo: Memo) => {
+  try {
+    const time = await $.clock.now()
+    if (memo.trailing === null && time - memo.eventAt >= EVENT_MS) {
+      memo.eventAt = time
+      await poke($, memo)
+      return
+    }
+    memo.trailing?.cancel()
+    memo.trailing = $.clock.after(EVENT_MS, () => {
+      memo.trailing = null
+      memo.eventAt = time + EVENT_MS
+      void poke($, memo)
+    })
+  } catch {
+    // the next event or tick refreshes
+  }
+}
+
 export const register: Register = on => {
-  const memo: Memo = { isActive: false, project: '' }
+  const memo: Memo = {
+    isActive: false,
+    project: '',
+    timer: null,
+    tickedAt: 0,
+    started: 0,
+    written: 0,
+    eventAt: 0,
+    trailing: null,
+  }
 
   on('session.start', async ($, e, next) => {
     memo.project = e.cwd.split(/[\\/]/).filter(part => part !== '').pop() ?? ''
-    $.clock.every(TICK_MS, () => {
-      void refresh($, memo).catch(() => undefined)
-    })
-    await refresh($, memo).catch(() => undefined)
+    await arm($, memo).catch(() => undefined)
+    await tick($, memo)
 
     return next(e)
   })
 
+  // After each tool call and at the end of each turn, so the pane follows the
+  // dispatcher moving files. The main session's turn end refreshes at once;
+  // tool calls and subagent turns are coalesced (see nudge).
+  on('tool.call', async ($, e, next) => {
+    try {
+      return await next(e)
+    } finally {
+      void nudge($, memo)
+    }
+  })
+  on('turn.complete', async ($, e, next) => {
+    try {
+      return await next(e)
+    } finally {
+      void (e.agentId === undefined ? poke($, memo) : nudge($, memo))
+    }
+  })
+
   on('command.run', { command: COMMAND }, async $ => {
-    await refresh($, memo)
+    await tick($, memo)
     await $.ui.open({ id: PANE, title: TITLE })
 
     return { text: 'Bridge panel opened.' }
@@ -124,7 +272,7 @@ export const register: Register = on => {
   // width. The skill itself always runs.
   on('command.run', { command: SKILL }, async ($, e, next) => {
     if (e.args.trim() !== 'stop') {
-      await refresh($, memo).catch(() => undefined)
+      await tick($, memo)
       await $.ui.open({ id: PANE, title: TITLE })
     }
 
