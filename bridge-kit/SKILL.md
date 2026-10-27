@@ -70,6 +70,8 @@ Each task file starts with header lines under its title. Missing lines take the 
 
 If `.bridge/doorbell` exists, it holds a scheduled task id (`trig_...`). Read the id from `.bridge/doorbell` at the moment of each ring, never from memory or from what the file held at session start: Cowork may have written a new id since. To ring, run that scheduled task with your scheduled tasks / routines tool (the one behind /schedule), with no request body and no text. Never create, edit or delete any scheduled task. If the run fails, re-read `.bridge/doorbell` once and, only if the id changed, retry once with the new id. If it still fails, say so in `session-notes.md`.
 
+Code on another account: if `.bridge/ring-config-dir` exists, this session runs on an account that cannot run the doorbell's scheduled task, so ring by running `~/.claude/skills/bridge/ring.sh` from the project root instead of the scheduled tasks tool. It reads `.bridge/doorbell` itself and makes one short Haiku call on the account in that config dir; exit 0 means it fired. The same rule applies on failure: re-read `.bridge/doorbell` once and, only if the id changed, run `ring.sh` once more. If it still fails, say so in `session-notes.md`, noting that it rang through `ring.sh`, with its output. The user may need to allow that one command once.
+
 When to ring:
 - Right away when a report has `Status: blocked` or needs a user decision.
 - Otherwise when the last running subagent finishes (nothing running and nothing queued). This session has no timer: while long work keeps running, nothing rings until the work is done, and the user's own notifier covers waits for approval.

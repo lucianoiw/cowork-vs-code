@@ -51,8 +51,9 @@ Several Cowork conversations on one project (for example an orchestrator that dr
 |---|---|
 | `bridge-kit/SKILL.md` | The `/bridge` skill for Claude Code (dispatcher protocol) |
 | `bridge-kit/wait-task.sh` | Zero-idle watcher |
+| `bridge-kit/ring.sh` | Rings the doorbell through another account's config dir (see Code on another account) |
 | `bridge-kit/pre-push` | Git hook that refuses pushes to `main`/`master` |
-| `bridge-kit/install.sh` | Copies the skill, watcher and hook to `~/.claude/skills/bridge/` |
+| `bridge-kit/install.sh` | Copies the skill, watcher, ring script and hook to `~/.claude/skills/bridge/` |
 | `bridge-kit/cowork-skill/code-bridge/SKILL.md` | The Cowork-side skill (task writing, doorbell, review, PR flow) |
 | `bridge-kit/mod/bridge-mod/` | Optional Claude Code mod: bridge panel and main-push guard |
 | `*.js`, `*.test.js` | Small fixtures used to test the bridge |
@@ -67,6 +68,14 @@ Several Cowork conversations on one project (for example an orchestrator that dr
 6. Ask Cowork to send work to the Code.
 
 To turn the bridge off without closing the Code session, type `/bridge stop` there (or have Cowork create `.bridge/stop`). Running subagents finish and report as usual; pending tasks stay in `inbox/` until `/bridge` runs again.
+
+## Code on another account
+
+The doorbell is a scheduled task of the account that runs Cowork, and only that account can fire it. When a project's Claude Code runs on another account (for example a client's, so the client's plan pays for the coding), the Code rings through a one-shot headless call on the Cowork account instead:
+
+1. Log the Cowork account into a separate config dir once: `CLAUDE_CONFIG_DIR=~/.claude-pessoal claude auth login`.
+2. Write that path (`~/.claude-pessoal`) as the only line of `.bridge/ring-config-dir` in the project. Like the rest of `.bridge/`, it stays out of git.
+3. Nothing else: when that file exists, `/bridge` rings with `~/.claude/skills/bridge/ring.sh`, and each ring costs one short Haiku call on the Cowork account. You may need to allow that command once in the Code session.
 
 ## Optional: bridge-mod
 
