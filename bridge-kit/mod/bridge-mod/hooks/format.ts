@@ -168,3 +168,23 @@ export const splitByAgents = (working: Task[], inbox: Task[], numbers: ReadonlyS
 
   return { running: all.filter(isRunning), waiting: all.filter(task => !isRunning(task)) }
 }
+
+// The task numbers a task's `Depends: 003, 004` header line names.
+export const dependsOn = (text: string) => {
+  const line = /^Depends:(.*)$/m.exec(text)?.[1] ?? ''
+
+  return [...line.matchAll(/\d+/g)].map(match => match[0])
+}
+
+// The task numbers of the files in done/ and read/: the tasks that are over.
+export const finishedNumbers = (files: readonly string[]) =>
+  new Set(
+    files
+      .map(file => taskLabel(file).number)
+      .filter(number => number !== '')
+      .map(numberKey),
+  )
+
+// The dependencies that are not over yet.
+export const unmetDepends = (depends: readonly string[], finished: ReadonlySet<string>) =>
+  depends.filter(number => !finished.has(numberKey(number)))

@@ -1,4 +1,10 @@
-export type BridgeTask = { file: string; mtimeMs: number }
+export type BridgeTask = {
+  file: string
+  mtimeMs: number
+  // a task of working/ no agent runs whose `Depends:` names tasks with no
+  // report in done/ or read/ yet: those numbers
+  waitingFor?: string[]
+}
 
 export type BridgeSnapshot = {
   project: string
@@ -12,6 +18,8 @@ export type BridgeSnapshot = {
   doorbell: string | null
   notes: string[]
   refreshedAt: number
+  // the last refresh failed with this message; cleared by the next one that works
+  error?: string
 }
 
 declare module 'claude-code' {
