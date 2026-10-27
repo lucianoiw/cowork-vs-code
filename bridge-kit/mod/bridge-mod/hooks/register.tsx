@@ -22,6 +22,8 @@ const SKILL = 'bridge'
 const HINT = 'Ponte ativa: /bridge-panel abre o painel'
 const NOTES = 'session-notes.md'
 const TICK_MS = 10_000
+// Event refreshes (tool calls, subagent turns) are coalesced to one per this.
+const EVENT_MS = 2_000
 
 const DENY =
   'bridge-mod: pushing to main/master is blocked; changes reach main only through a PR.'
@@ -96,6 +98,9 @@ type Memo = {
   // refresh never overwrites a newer reading
   started: number
   written: number
+  // when an event last refreshed, and the trailing refresh it has pending
+  eventAt: number
+  trailing: Timer | null
 }
 
 // Reads the bridge folders (never writes them) and shows what they hold. The
@@ -194,6 +199,29 @@ const poke = async ($: EngineInterface, memo: Memo) => {
   await tick($, memo)
 }
 
+// A poke for events that come in bursts (every tool call of every subagent):
+// at most one per EVENT_MS. An event in a quiet spell refreshes at once; one
+// inside the window (re)schedules a single refresh EVENT_MS after it, so a
+// burst ends with one refresh that draws its final state. Never throws.
+const nudge = async ($: EngineInterface, memo: Memo) => {
+  try {
+    const time = await $.clock.now()
+    if (memo.trailing === null && time - memo.eventAt >= EVENT_MS) {
+      memo.eventAt = time
+      await poke($, memo)
+      return
+    }
+    memo.trailing?.cancel()
+    memo.trailing = $.clock.after(EVENT_MS, () => {
+      memo.trailing = null
+      memo.eventAt = time + EVENT_MS
+      void poke($, memo)
+    })
+  } catch {
+    // the next event or tick refreshes
+  }
+}
+
 export const register: Register = on => {
   const memo: Memo = {
     isActive: false,
@@ -202,6 +230,8 @@ export const register: Register = on => {
     tickedAt: 0,
     started: 0,
     written: 0,
+    eventAt: 0,
+    trailing: null,
   }
 
   on('session.start', async ($, e, next) => {
@@ -212,20 +242,21 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // After each tool call and at the end of each turn (the session's, or a
-  // subagent's), so the pane follows the dispatcher moving files right away.
+  // After each tool call and at the end of each turn, so the pane follows the
+  // dispatcher moving files. The main session's turn end refreshes at once;
+  // tool calls and subagent turns are coalesced (see nudge).
   on('tool.call', async ($, e, next) => {
     try {
       return await next(e)
     } finally {
-      void poke($, memo)
+      void nudge($, memo)
     }
   })
   on('turn.complete', async ($, e, next) => {
     try {
       return await next(e)
     } finally {
-      void poke($, memo)
+      void (e.agentId === undefined ? poke($, memo) : nudge($, memo))
     }
   })
 

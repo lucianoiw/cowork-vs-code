@@ -37,6 +37,8 @@ type World = {
   isPlaced?: boolean
   // while above zero, `$.fs.exists` throws and counts down: a refresh that fails
   failures?: { count: number }
+  // counts `$.agent.list()` calls: one per refresh that reads the folders
+  refreshes?: { count: number }
 }
 
 // A subagent of the session as `$.agent.list()` gives it.
@@ -59,6 +61,7 @@ const world = (
     agents = [],
     isPlaced = true,
     failures = { count: 0 },
+    refreshes = { count: 0 },
   }: World = {},
 ) => {
   const seen = {
@@ -109,6 +112,7 @@ const world = (
     return { value: undefined }
   })
   on('agent.list', () => {
+    refreshes.count += 1
     if (agents === null) {
       throw new Error('no agent list here')
     }
@@ -978,6 +982,42 @@ test('the pane refreshes after each tool call and at the end of each turn, betwe
   await $.turn.complete(TURN)
   await clock.settle()
   expect(await queue()).toBe('Na fila (1)')
+})
+
+test('a burst of tool calls refreshes at most twice and ends on the last state', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const files: Record<string, string> = { ...DATED }
+  const refreshes = { count: 0 }
+  world(on, { files, mtimes: MTIMES, agents: RUNS_052, refreshes })
+  const queue = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const text = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+    await ui.unmount()
+
+    return text.find(one => one.startsWith('Na fila'))
+  }
+
+  await $.session.start(START)
+  await clock.advance(5_000)
+  refreshes.count = 0
+
+  // ten calls within 1 s; the folders change before the last one
+  for (let call = 0; call < 10; call += 1) {
+    if (call === 9) {
+      delete files['.bridge/inbox/054-other.md']
+    }
+    await $.tool.call({ tool: 'Read', file_path: '/project/x' })
+    await clock.advance(100)
+  }
+  await clock.settle()
+  expect(refreshes.count).toBe(1)
+  expect(await queue()).toBe('Na fila (3)')
+
+  // the trailing refresh, about 2 s after the last call, draws the last state
+  await clock.advance(2_000)
+  await clock.settle()
+  expect(refreshes.count).toBeLessThanOrEqual(2)
+  expect(await queue()).toBe('Na fila (2)')
 })
 
 test('an event re-arms the timer once its ticks stopped', async ($, on) => {
