@@ -38,7 +38,9 @@ elif command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT=(gtimeout 120)
 fi
 
-REPLY=$(CLAUDE_CONFIG_DIR="$CONFIG_DIR" "${TIMEOUT[@]}" claude -p --model haiku "$PROMPT")
+# Drop the calling session's vars (nested-session guard, tokens that would beat
+# CLAUDE_CONFIG_DIR) and run from $HOME so no project CLAUDE.md or settings load.
+REPLY=$(cd "$HOME" && env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR="$CONFIG_DIR" "${TIMEOUT[@]}" claude -p --model haiku "$PROMPT")
 echo "$REPLY"
 case "$REPLY" in
   *FAILED*) exit 1 ;;
